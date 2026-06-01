@@ -552,6 +552,10 @@ function sourceItemLabel(item: SourceItem) {
   return source?.name || item.source_type || "Unknown adapter";
 }
 
+function sourceItemRawURL(item: SourceItem) {
+  return `/api/source-items/${item.id}/raw`;
+}
+
 function clearImportState() {
   Object.assign(importDraft, importDraftDefaults);
   localStorage.removeItem(importDraftStorageKey);
@@ -874,6 +878,15 @@ onUnmounted(() => {
                 <Icon name="activity" :size="17" />
                 <span>Task</span>
               </button>
+              <a
+                v-if="recentImportTask.result_json?.item?.raw_content_path"
+                class="secondary"
+                :href="sourceItemRawURL(recentImportTask.result_json.item)"
+                target="_blank"
+              >
+                <Icon name="file-search" :size="17" />
+                <span>Raw HTML</span>
+              </a>
             </div>
           </div>
           <label>
@@ -895,7 +908,7 @@ onUnmounted(() => {
             <span>Create game</span>
           </label>
           <label class="wide">
-            <span>Raw HTML</span>
+            <span>Raw HTML paste fallback</span>
             <textarea v-model="importDraft.html" rows="16"></textarea>
           </label>
         </div>
@@ -1020,10 +1033,21 @@ onUnmounted(() => {
                   </template>
                 </dl>
               </section>
-              <a v-if="selectedTaskSourceItem.raw_url" class="open-link" :href="selectedTaskSourceItem.raw_url" target="_blank">
-                <Icon name="eye" :size="17" />
-                <span>Open source</span>
-              </a>
+              <div class="result-actions">
+                <a
+                  v-if="selectedTaskSourceItem.raw_content_path"
+                  class="open-link"
+                  :href="sourceItemRawURL(selectedTaskSourceItem)"
+                  target="_blank"
+                >
+                  <Icon name="file-search" :size="17" />
+                  <span>Open raw HTML</span>
+                </a>
+                <a v-if="selectedTaskSourceItem.raw_url" class="open-link" :href="selectedTaskSourceItem.raw_url" target="_blank">
+                  <Icon name="eye" :size="17" />
+                  <span>Open source</span>
+                </a>
+              </div>
             </div>
           </section>
         </div>
@@ -1129,10 +1153,16 @@ onUnmounted(() => {
             <p>{{ section.body }}</p>
           </section>
 
-          <a v-if="selectedItem.raw_url" class="open-link" :href="selectedItem.raw_url" target="_blank">
-            <Icon name="eye" :size="17" />
-            <span>Open source</span>
-          </a>
+          <div class="result-actions">
+            <a v-if="selectedItem.raw_content_path" class="open-link" :href="sourceItemRawURL(selectedItem)" target="_blank">
+              <Icon name="file-search" :size="17" />
+              <span>Open raw HTML</span>
+            </a>
+            <a v-if="selectedItem.raw_url" class="open-link" :href="selectedItem.raw_url" target="_blank">
+              <Icon name="eye" :size="17" />
+              <span>Open source</span>
+            </a>
+          </div>
         </div>
       </section>
     </main>

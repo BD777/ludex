@@ -64,6 +64,8 @@ func New(store *storage.Store) http.Handler {
 	r.Post("/api/sources/{sourceID}/fetch", server.fetchSource)
 
 	r.Get("/api/source-items", server.listSourceItems)
+	r.Get("/api/source-items/{itemID}/raw", server.serveSourceItemRaw)
+	r.Head("/api/source-items/{itemID}/raw", server.serveSourceItemRaw)
 	r.Delete("/api/source-items/{itemID}", server.deleteSourceItem)
 	r.Post("/api/source-items/{itemID}/create-game", server.createGameFromSourceItem)
 	r.Post("/api/source-items/{itemID}/match", server.matchSourceItem)
@@ -530,6 +532,34 @@ func (s *Server) matchSourceItem(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) serveSourceItemRaw(w http.ResponseWriter, r *http.Request) {
+	itemID, err := urlParamInt(r, "itemID")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	item, err := s.store.GetSourceItem(r.Context(), itemID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if strings.TrimSpace(item.RawContentPath) == "" {
+		writeError(w, errors.New("raw HTML is not saved for this item"))
+		return
+	}
+	localPath, err := s.safeDataPath(item.RawContentPath)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	filename := fmt.Sprintf("source-item-%d.html", item.ID)
+	w.Header().Set("Cache-Control", "private, max-age=0")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": filename}))
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeFile(w, r, localPath)
 }
 
 func (s *Server) serveMedia(w http.ResponseWriter, r *http.Request) {
