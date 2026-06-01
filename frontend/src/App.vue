@@ -68,6 +68,7 @@ type Transcript = {
   source_url?: string;
   external_id?: string;
   title?: string;
+  fields?: TranscriptFields;
   key_values?: Record<string, string[]>;
   sections?: Array<{ heading: string; body: string }>;
   images?: string[];
@@ -80,6 +81,37 @@ type Transcript = {
     cover_image?: string;
   };
   warnings?: string[];
+};
+
+type NamedURL = {
+  name: string;
+  url?: string;
+};
+
+type DownloadGroup = {
+  platform: string;
+  note?: string;
+  links?: NamedURL[];
+};
+
+type TranscriptFields = {
+  game_name?: string;
+  prefixes?: string[];
+  engine?: string;
+  cover_image?: string;
+  description?: string;
+  thread_updated?: string;
+  release_date?: string;
+  developer?: string;
+  developer_links?: NamedURL[];
+  censored?: boolean | null;
+  version?: string;
+  operating_systems?: string[];
+  languages?: string[];
+  genres?: string[];
+  changelog?: string;
+  download_groups?: DownloadGroup[];
+  screenshots?: string[];
 };
 
 type ViewName = "games" | "adapters" | "import" | "items" | "tasks";
@@ -554,6 +586,18 @@ function sourceItemLabel(item: SourceItem) {
 
 function sourceItemRawURL(item: SourceItem) {
   return `/api/source-items/${item.id}/raw`;
+}
+
+function formatList(values?: string[]) {
+  const filtered = values?.filter((value) => value.trim() !== "") ?? [];
+  return filtered.length ? filtered.join(", ") : "Unknown";
+}
+
+function formatBoolean(value?: boolean | null) {
+  if (typeof value !== "boolean") {
+    return "Unknown";
+  }
+  return value ? "Yes" : "No";
 }
 
 function clearImportState() {
@@ -1114,15 +1158,47 @@ onUnmounted(() => {
           <div class="meta-grid">
             <div>
               <span>Game</span>
-              <strong>{{ selectedTranscript.inferred?.game_title || selectedTranscript.title }}</strong>
+              <strong>{{ selectedTranscript.fields?.game_name || selectedTranscript.inferred?.game_title || selectedTranscript.title }}</strong>
             </div>
             <div>
               <span>Version</span>
-              <strong>{{ selectedTranscript.inferred?.version || "Unknown" }}</strong>
+              <strong>{{ selectedTranscript.fields?.version || selectedTranscript.inferred?.version || "Unknown" }}</strong>
             </div>
             <div>
               <span>Developer</span>
-              <strong>{{ selectedTranscript.inferred?.developer || "Unknown" }}</strong>
+              <strong>{{ selectedTranscript.fields?.developer || selectedTranscript.inferred?.developer || "Unknown" }}</strong>
+            </div>
+            <div>
+              <span>Engine</span>
+              <strong>{{ selectedTranscript.fields?.engine || "Unknown" }}</strong>
+            </div>
+            <div>
+              <span>Prefixes</span>
+              <strong>{{ formatList(selectedTranscript.fields?.prefixes) }}</strong>
+            </div>
+            <div>
+              <span>Censored</span>
+              <strong>{{ formatBoolean(selectedTranscript.fields?.censored) }}</strong>
+            </div>
+            <div>
+              <span>Updated</span>
+              <strong>{{ selectedTranscript.fields?.thread_updated || "Unknown" }}</strong>
+            </div>
+            <div>
+              <span>Released</span>
+              <strong>{{ selectedTranscript.fields?.release_date || "Unknown" }}</strong>
+            </div>
+            <div>
+              <span>OS</span>
+              <strong>{{ formatList(selectedTranscript.fields?.operating_systems) }}</strong>
+            </div>
+            <div>
+              <span>Language</span>
+              <strong>{{ formatList(selectedTranscript.fields?.languages) }}</strong>
+            </div>
+            <div>
+              <span>Genre</span>
+              <strong>{{ formatList(selectedTranscript.fields?.genres) }}</strong>
             </div>
             <div>
               <span>Raw</span>
@@ -1134,8 +1210,51 @@ onUnmounted(() => {
             <p v-for="warning in selectedTranscript.warnings" :key="warning">{{ warning }}</p>
           </div>
 
+          <section v-if="selectedTranscript.fields?.description" class="transcript-section">
+            <h3>Overview</h3>
+            <p>{{ selectedTranscript.fields.description }}</p>
+          </section>
+
+          <section v-if="selectedTranscript.fields?.developer_links?.length" class="transcript-section">
+            <h3>Developer Links</h3>
+            <div class="link-list">
+              <a
+                v-for="link in selectedTranscript.fields.developer_links"
+                :key="`${link.name}-${link.url}`"
+                :href="link.url"
+                target="_blank"
+              >
+                {{ link.name }}
+              </a>
+            </div>
+          </section>
+
+          <section v-if="selectedTranscript.fields?.download_groups?.length" class="transcript-section">
+            <h3>Downloads</h3>
+            <dl>
+              <template v-for="group in selectedTranscript.fields.download_groups" :key="group.platform">
+                <dt>{{ group.platform }}</dt>
+                <dd>
+                  <template v-if="group.links?.length">
+                    <span v-for="(link, index) in group.links" :key="`${group.platform}-${link.name}-${index}`">
+                      <a v-if="link.url" :href="link.url" target="_blank">{{ link.name }}</a>
+                      <span v-else>{{ link.name }}</span>
+                      <span v-if="index < (group.links?.length ?? 0) - 1">, </span>
+                    </span>
+                  </template>
+                  <span v-else>Unknown</span>
+                </dd>
+              </template>
+            </dl>
+          </section>
+
+          <section v-if="selectedTranscript.fields?.changelog" class="transcript-section">
+            <h3>Changelog</h3>
+            <p>{{ selectedTranscript.fields.changelog }}</p>
+          </section>
+
           <section v-if="keyValues.length" class="transcript-section">
-            <h3>Fields</h3>
+            <h3>Raw Fields</h3>
             <dl>
               <template v-for="[key, values] in keyValues" :key="key">
                 <dt>{{ key }}</dt>

@@ -75,6 +75,7 @@ type Transcript struct {
 	SourceURL   string              `json:"source_url"`
 	ExternalID  string              `json:"external_id"`
 	Title       string              `json:"title"`
+	Fields      TranscriptFields    `json:"fields"`
 	KeyValues   map[string][]string `json:"key_values"`
 	Sections    []TranscriptSection `json:"sections"`
 	Images      []string            `json:"images"`
@@ -82,6 +83,37 @@ type Transcript struct {
 	Tags        []string            `json:"tags"`
 	Inferred    TranscriptInferred  `json:"inferred"`
 	Warnings    []string            `json:"warnings"`
+}
+
+type NamedURL struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+type DownloadGroup struct {
+	Platform string     `json:"platform"`
+	Note     string     `json:"note"`
+	Links    []NamedURL `json:"links"`
+}
+
+type TranscriptFields struct {
+	GameName         string          `json:"game_name"`
+	Prefixes         []string        `json:"prefixes"`
+	Engine           string          `json:"engine"`
+	CoverImage       string          `json:"cover_image"`
+	Description      string          `json:"description"`
+	ThreadUpdated    string          `json:"thread_updated"`
+	ReleaseDate      string          `json:"release_date"`
+	Developer        string          `json:"developer"`
+	DeveloperLinks   []NamedURL      `json:"developer_links"`
+	Censored         *bool           `json:"censored,omitempty"`
+	Version          string          `json:"version"`
+	OperatingSystems []string        `json:"operating_systems"`
+	Languages        []string        `json:"languages"`
+	Genres           []string        `json:"genres"`
+	Changelog        string          `json:"changelog"`
+	DownloadGroups   []DownloadGroup `json:"download_groups"`
+	Screenshots      []string        `json:"screenshots"`
 }
 
 type TranscriptSection struct {

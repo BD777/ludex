@@ -650,6 +650,7 @@ func (s *Server) cacheTranscriptMedia(ctx context.Context, transcript domain.Tra
 
 	sourceItemRef := sourceItemID
 	cachedImages := []string{}
+	cachedByOriginal := map[string]string{}
 	limit := len(transcript.Images)
 	if limit > maxCachedImages {
 		limit = maxCachedImages
@@ -671,12 +672,26 @@ func (s *Server) cacheTranscriptMedia(ctx context.Context, transcript domain.Tra
 		asset.PublicURL = mediaPublicURL(asset.ID)
 		transcript.MediaAssets = append(transcript.MediaAssets, asset)
 		cachedImages = append(cachedImages, asset.PublicURL)
+		cachedByOriginal[imageURL] = asset.PublicURL
+		cachedByOriginal[resolvedURL] = asset.PublicURL
 	}
 	report(startProgress+limit, totalProgress, "Media cache updated")
 
 	transcript.Images = cachedImages
-	if len(cachedImages) > 0 {
-		transcript.Inferred.CoverImage = cachedImages[0]
+	if cachedCover := cachedByOriginal[transcript.Fields.CoverImage]; cachedCover != "" {
+		transcript.Fields.CoverImage = cachedCover
+	} else if len(cachedImages) > 0 {
+		transcript.Fields.CoverImage = cachedImages[0]
+	}
+	cachedScreenshots := []string{}
+	for _, imageURL := range transcript.Fields.Screenshots {
+		if cached := cachedByOriginal[imageURL]; cached != "" {
+			cachedScreenshots = append(cachedScreenshots, cached)
+		}
+	}
+	transcript.Fields.Screenshots = cachedScreenshots
+	if transcript.Fields.CoverImage != "" {
+		transcript.Inferred.CoverImage = transcript.Fields.CoverImage
 	} else {
 		transcript.Inferred.CoverImage = ""
 	}

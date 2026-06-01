@@ -703,6 +703,27 @@ textarea:focus {
   white-space: pre-wrap;
 }
 
+.link-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.link-list a {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: 7px;
+  color: #243d35;
+  background: #e8eee6;
+  text-decoration: none;
+}
+
+.link-list a:hover {
+  background: #dce8dc;
+}
+
 dl {
   display: grid;
   grid-template-columns: 150px minmax(0, 1fr);

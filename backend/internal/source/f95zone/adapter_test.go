@@ -16,13 +16,17 @@ func TestParseHTMLExtractsThreadMeta(t *testing.T) {
 			<h1 class="p-title-value">Sample Game [v1.2] [Example Dev]</h1>
 			<article class="message--post">
 				<div class="bbWrapper">
+					<a href="https://example.test/cover-full.jpg"><img class="bbImage" src="https://example.test/cover-thumb.jpg" /></a>
 					Overview:
 					A short summary.
 
 					Developer: Example Dev
+					Censored: No
 					Version: v1.2
+					OS: Windows, Linux
+					Language: English
 					Genre: Adventure
-					<img src="https://example.test/screen-1.jpg" />
+					<a href="https://example.test/screen-1.jpg"><img class="bbImage" src="https://example.test/screen-1-thumb.jpg" /></a>
 				</div>
 			</article>
 			<div class="js-tagList"><a>2dcg</a><a>adventure</a></div>
@@ -47,5 +51,17 @@ func TestParseHTMLExtractsThreadMeta(t *testing.T) {
 	}
 	if len(transcript.Images) != 2 {
 		t.Fatalf("images = %#v", transcript.Images)
+	}
+	if transcript.Fields.GameName != "Sample Game" {
+		t.Fatalf("field game name = %q", transcript.Fields.GameName)
+	}
+	if transcript.Fields.CoverImage != "https://example.test/cover-full.jpg" {
+		t.Fatalf("cover image = %q", transcript.Fields.CoverImage)
+	}
+	if transcript.Fields.Censored == nil || *transcript.Fields.Censored {
+		t.Fatalf("censored = %#v", transcript.Fields.Censored)
+	}
+	if strings.Join(transcript.Fields.OperatingSystems, ",") != "Windows,Linux" {
+		t.Fatalf("operating systems = %#v", transcript.Fields.OperatingSystems)
 	}
 }
