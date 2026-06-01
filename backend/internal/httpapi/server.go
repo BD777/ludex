@@ -1,0 +1,981 @@
+package httpapi
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"golang.org/x/net/proxy"
+	"local/ludex/internal/domain"
+	"local/ludex/internal/source/f95zone"
+	"local/ludex/internal/storage"
+)
+
+type Server struct {
+	store *storage.Store
+}
+
+type progressReporter func(current int, total int, message string)
+
+type importF95zoneResult struct {
+	Item       domain.SourceItem `json:"item"`
+	Game       *domain.Game      `json:"game"`
+	Transcript domain.Transcript `json:"transcript"`
+}
+
+const (
+	maxCachedImages = 32
+	maxHTMLBytes    = 20 << 20
+	maxMediaBytes   = 25 << 20
+)
+
+func New(store *storage.Store) http.Handler {
+	server := &Server{store: store}
+	r := chi.NewRouter()
+
+	r.Get("/api/health", server.health)
+	r.Get("/api/tasks", server.listTasks)
+	r.Get("/api/tasks/{taskID}", server.getTask)
+
+	r.Get("/api/games", server.listGames)
+	r.Post("/api/games", server.createGame)
+	r.Get("/api/games/{gameID}", server.getGame)
+	r.Patch("/api/games/{gameID}", server.updateGame)
+	r.Delete("/api/games/{gameID}", server.deleteGame)
+
+	r.Get("/api/sources", server.listSources)
+	r.Post("/api/sources", server.createSource)
+	r.Post("/api/sources/{sourceID}/fetch", server.fetchSource)
+
+	r.Get("/api/source-items", server.listSourceItems)
+	r.Delete("/api/source-items/{itemID}", server.deleteSourceItem)
+	r.Post("/api/source-items/{itemID}/create-game", server.createGameFromSourceItem)
+	r.Post("/api/source-items/{itemID}/match", server.matchSourceItem)
+
+	r.Get("/api/media/{mediaID}/content", server.serveMedia)
+	r.Head("/api/media/{mediaID}/content", server.serveMedia)
+
+	r.Post("/api/import/f95zone", server.importF95zone)
+
+	return r
+}
+
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"dataDir": s.store.DataDir(),
+	})
+}
+
+func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
+	tasks, err := s.store.ListTasks(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tasks)
+}
+
+func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
+	taskID, err := urlParamInt(r, "taskID")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	task, err := s.store.GetTask(r.Context(), taskID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (s *Server) listGames(w http.ResponseWriter, r *http.Request) {
+	games, err := s.store.ListGames(r.Context(), r.URL.Query().Get("q"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, games)
+}
+
+func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
+	var input domain.Game
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, err)
+		return
+	}
+	game, err := s.store.CreateGame(r.Context(), input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, game)
+}
+
+func (s *Server) getGame(w http.ResponseWriter, r *http.Request) {
+	gameID, err := urlParamInt(r, "gameID")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	game, err := s.store.GetGame(r.Context(), gameID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, game)
+}
+
+func (s *Server) updateGame(w http.ResponseWriter, r *http.Request) {
+	gameID, err := urlParamInt(r, "gameID")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var input domain.Game
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, err)
+		return
+	}
+	game, err := s.store.UpdateGame(r.Context(), gameID, input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, game)
+}
+
+func (s *Server) deleteGame(w http.ResponseWriter, r *http.Request) {
+	gameID, err := urlParamInt(r, "gameID")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	paths, err := s.store.DeleteGame(r.Context(), gameID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.deleteDataFiles(paths); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted": true,
+	})
+}
+
+func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
+	sources, err := s.store.ListSources(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sources)
+}
+
+func (s *Server) createSource(w http.ResponseWriter, r *http.Request) {
+	var input domain.Source
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, err)
+		return
+	}
+	source, err := s.store.CreateSource(r.Context(), input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, source)
+}
+
+func (s *Server) fetchSource(w http.ResponseWriter, r *http.Request) {
+	sourceID, err := urlParamInt(r, "sourceID")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	source, err := s.store.GetSource(r.Context(), sourceID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if source.Type != "f95zone" {
+		writeError(w, fmt.Errorf("unsupported source type %q", source.Type))
+		return
+	}
+	req := importF95zoneRequest{
+		SourceID: &source.ID,
+		URL:      source.URL,
+		ProxyURL: source.ProxyURL,
+	}
+	s.queueF95zoneImport(w, r, req)
+}
+
+func (s *Server) listSourceItems(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListSourceItems(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) deleteSourceItem(w http.ResponseWriter, r *http.Request) {
+	itemID, err := urlParamInt(r, "itemID")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	paths, err := s.store.DeleteSourceItem(r.Context(), itemID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.deleteDataFiles(paths); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted": true,
+	})
+}
+
+func (s *Server) importF95zone(w http.ResponseWriter, r *http.Request) {
+	var req importF95zoneRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.queueF95zoneImport(w, r, req)
+}
+
+func (s *Server) queueF95zoneImport(w http.ResponseWriter, r *http.Request, req importF95zoneRequest) {
+	var err error
+	req, err = s.resolveF95zoneImportRequest(r.Context(), req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if req.SourceID == nil && strings.TrimSpace(req.URL) == "" && strings.TrimSpace(req.HTML) == "" {
+		writeError(w, errors.New("source_id, url, or html is required"))
+		return
+	}
+	dedupeKey := f95zoneTaskDedupeKey(req)
+	if dedupeKey != "" {
+		existing, err := s.store.GetActiveTaskByDedupeKey(r.Context(), "import:f95zone", dedupeKey)
+		if err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"task":      existing,
+				"duplicate": true,
+			})
+			return
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			writeError(w, err)
+			return
+		}
+	}
+	task, err := s.store.CreateTask(r.Context(), domain.Task{
+		Kind:      "import:f95zone",
+		DedupeKey: dedupeKey,
+		Status:    "queued",
+		Title:     importTaskTitle(req),
+		Message:   "Queued",
+	})
+	if err != nil {
+		if dedupeKey != "" {
+			existing, lookupErr := s.store.GetActiveTaskByDedupeKey(r.Context(), "import:f95zone", dedupeKey)
+			if lookupErr == nil {
+				writeJSON(w, http.StatusOK, map[string]any{
+					"task":      existing,
+					"duplicate": true,
+				})
+				return
+			}
+		}
+		writeError(w, err)
+		return
+	}
+	go s.runF95zoneImportTask(task.ID, req)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"task":      task,
+		"duplicate": false,
+	})
+}
+
+func (s *Server) resolveF95zoneImportRequest(ctx context.Context, req importF95zoneRequest) (importF95zoneRequest, error) {
+	if req.SourceID == nil {
+		return req, nil
+	}
+	source, err := s.store.GetSource(ctx, *req.SourceID)
+	if err != nil {
+		return req, err
+	}
+	if source.Type != "f95zone" {
+		return req, fmt.Errorf("unsupported source type %q", source.Type)
+	}
+	if req.URL == "" {
+		req.URL = source.URL
+	}
+	if req.ProxyURL == "" {
+		req.ProxyURL = source.ProxyURL
+	}
+	return req, nil
+}
+
+func (s *Server) runF95zoneImportTask(taskID int64, req importF95zoneRequest) {
+	ctx := context.Background()
+	_, _ = s.store.StartTask(ctx, taskID, "Starting import")
+	report := func(current int, total int, message string) {
+		_, _ = s.store.UpdateTaskProgress(ctx, taskID, current, total, message)
+	}
+
+	result, err := s.executeF95zoneImport(ctx, req, report)
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Import failed", err)
+		return
+	}
+	resultMap, err := structToMap(result)
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Import finished but result could not be stored", err)
+		return
+	}
+	_, _ = s.store.FinishTask(ctx, taskID, "Import complete", resultMap)
+}
+
+func (s *Server) executeF95zoneImport(ctx context.Context, req importF95zoneRequest, report progressReporter) (importF95zoneResult, error) {
+	report(0, 0, "Resolving source")
+	if req.SourceID != nil {
+		source, err := s.store.GetSource(ctx, *req.SourceID)
+		if err != nil {
+			return importF95zoneResult{}, err
+		}
+		if req.URL == "" {
+			req.URL = source.URL
+		}
+		if req.ProxyURL == "" {
+			req.ProxyURL = source.ProxyURL
+		}
+	}
+
+	rawHTML := []byte(req.HTML)
+	if len(rawHTML) == 0 {
+		if req.URL == "" {
+			return importF95zoneResult{}, errors.New("url or html is required")
+		}
+		report(1, 0, "Fetching thread HTML")
+		body, err := fetchURL(ctx, req.URL, req.ProxyURL)
+		if err != nil {
+			return importF95zoneResult{}, err
+		}
+		rawHTML = body
+	} else {
+		report(1, 0, "Using pasted HTML")
+	}
+
+	report(2, 0, "Parsing F95zone thread")
+	transcript, err := f95zone.ParseHTML(req.URL, bytes.NewReader(rawHTML))
+	if err != nil {
+		return importF95zoneResult{}, err
+	}
+	parsed, err := structToMap(transcript)
+	if err != nil {
+		return importF95zoneResult{}, err
+	}
+	total := 6 + minInt(len(transcript.Images), maxCachedImages)
+
+	report(3, total, "Saving raw HTML")
+	rawPath, err := s.saveRawContent("f95zone", req.URL, rawHTML)
+	if err != nil {
+		return importF95zoneResult{}, err
+	}
+
+	report(4, total, "Saving source item")
+	itemTitle := firstNonEmpty(transcript.Inferred.GameTitle, transcript.Title, "Untitled F95zone thread")
+	item, replaced, err := s.store.UpsertSourceItemByAdapterKey(ctx, domain.SourceItem{
+		SourceID:       req.SourceID,
+		SourceType:     "f95zone",
+		ExternalID:     transcript.ExternalID,
+		Title:          itemTitle,
+		RawURL:         req.URL,
+		RawContentPath: rawPath,
+		ParsedJSON:     parsed,
+		FetchedAt:      time.Now().UTC().Format(time.RFC3339),
+		Status:         "imported",
+	})
+	if err != nil {
+		return importF95zoneResult{}, err
+	}
+	if replaced {
+		report(4, total, "Updating existing source item")
+	}
+	if err := s.store.DeleteMediaAssetsForSourceItem(ctx, item.ID); err != nil {
+		return importF95zoneResult{}, err
+	}
+
+	transcript = s.cacheTranscriptMedia(ctx, transcript, item.ID, req.ProxyURL, report, 5, total)
+	parsed, err = structToMap(transcript)
+	if err != nil {
+		return importF95zoneResult{}, err
+	}
+	item, err = s.store.UpdateSourceItemParsedJSON(ctx, item.ID, parsed)
+	if err != nil {
+		return importF95zoneResult{}, err
+	}
+
+	var game *domain.Game
+	if req.CreateGame {
+		report(total-1, total, "Saving game record")
+		created, err := s.saveGameFromTranscript(ctx, transcript, item.MatchedGameID)
+		if err != nil {
+			return importF95zoneResult{}, err
+		}
+		matched, err := s.store.SetSourceItemMatch(ctx, item.ID, &created.ID)
+		if err != nil {
+			return importF95zoneResult{}, err
+		}
+		if err := s.store.SetMediaAssetsGameForSourceItem(ctx, item.ID, created.ID); err != nil {
+			return importF95zoneResult{}, err
+		}
+		item = matched
+		game = &created
+	} else {
+		if item.MatchedGameID != nil {
+			if err := s.store.SetMediaAssetsGameForSourceItem(ctx, item.ID, *item.MatchedGameID); err != nil {
+				return importF95zoneResult{}, err
+			}
+		}
+		report(total-1, total, "Finalizing import")
+	}
+
+	report(total, total, "Import complete")
+	return importF95zoneResult{Item: item, Game: game, Transcript: transcript}, nil
+}
+
+func (s *Server) createGameFromSourceItem(w http.ResponseWriter, r *http.Request) {
+	itemID, err := urlParamInt(r, "itemID")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	item, err := s.store.GetSourceItem(r.Context(), itemID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	transcript, err := transcriptFromMap(item.ParsedJSON)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	game, err := s.createGameFromTranscript(r.Context(), transcript)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	item, err = s.store.SetSourceItemMatch(r.Context(), item.ID, &game.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.store.SetMediaAssetsGameForSourceItem(r.Context(), item.ID, game.ID); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"game": game,
+		"item": item,
+	})
+}
+
+func (s *Server) matchSourceItem(w http.ResponseWriter, r *http.Request) {
+	itemID, err := urlParamInt(r, "itemID")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var input struct {
+		GameID *int64 `json:"game_id"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, err)
+		return
+	}
+	item, err := s.store.SetSourceItemMatch(r.Context(), itemID, input.GameID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if input.GameID != nil {
+		if err := s.store.SetMediaAssetsGameForSourceItem(r.Context(), item.ID, *input.GameID); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) serveMedia(w http.ResponseWriter, r *http.Request) {
+	mediaID, err := urlParamInt(r, "mediaID")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	asset, err := s.store.GetMediaAsset(r.Context(), mediaID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	localPath, err := s.safeDataPath(asset.LocalPath)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	http.ServeFile(w, r, localPath)
+}
+
+func (s *Server) createGameFromTranscript(ctx context.Context, transcript domain.Transcript) (domain.Game, error) {
+	title := firstNonEmpty(transcript.Inferred.GameTitle, transcript.Title)
+	if title == "" {
+		return domain.Game{}, errors.New("cannot create a game without a title")
+	}
+	aliases := []string{}
+	if transcript.Title != "" && !strings.EqualFold(transcript.Title, title) {
+		aliases = append(aliases, transcript.Title)
+	}
+	return s.store.CreateGame(ctx, domain.Game{
+		Title:          title,
+		Aliases:        aliases,
+		Description:    transcript.Inferred.Description,
+		CurrentVersion: transcript.Inferred.Version,
+		CoverImage:     transcript.Inferred.CoverImage,
+	})
+}
+
+func (s *Server) saveGameFromTranscript(ctx context.Context, transcript domain.Transcript, existingGameID *int64) (domain.Game, error) {
+	if existingGameID == nil {
+		return s.createGameFromTranscript(ctx, transcript)
+	}
+	existing, err := s.store.GetGame(ctx, *existingGameID)
+	if err != nil {
+		return domain.Game{}, err
+	}
+	title := firstNonEmpty(transcript.Inferred.GameTitle, transcript.Title, existing.Title)
+	if title == "" {
+		return domain.Game{}, errors.New("cannot update a game without a title")
+	}
+	aliases := append([]string{}, existing.Aliases...)
+	if transcript.Title != "" && !strings.EqualFold(transcript.Title, title) && !containsFold(aliases, transcript.Title) {
+		aliases = append(aliases, transcript.Title)
+	}
+	return s.store.UpdateGame(ctx, existing.ID, domain.Game{
+		Title:          title,
+		Aliases:        aliases,
+		Description:    firstNonEmpty(transcript.Inferred.Description, existing.Description),
+		CurrentVersion: firstNonEmpty(transcript.Inferred.Version, existing.CurrentVersion),
+		CoverImage:     firstNonEmpty(transcript.Inferred.CoverImage, existing.CoverImage),
+	})
+}
+
+func (s *Server) saveRawContent(sourceType string, rawURL string, content []byte) (string, error) {
+	dir := filepath.Join(s.store.DataDir(), "raw", sourceType)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256([]byte(rawURL + "\n" + time.Now().UTC().Format(time.RFC3339Nano)))
+	name := hex.EncodeToString(hash[:])[:16] + ".html"
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path, nil
+	}
+	return abs, nil
+}
+
+func (s *Server) cacheTranscriptMedia(ctx context.Context, transcript domain.Transcript, sourceItemID int64, proxyURL string, report progressReporter, startProgress int, totalProgress int) domain.Transcript {
+	if len(transcript.Images) == 0 {
+		return transcript
+	}
+
+	sourceItemRef := sourceItemID
+	cachedImages := []string{}
+	limit := len(transcript.Images)
+	if limit > maxCachedImages {
+		limit = maxCachedImages
+		transcript.Warnings = append(transcript.Warnings, fmt.Sprintf("Only cached the first %d images.", maxCachedImages))
+	}
+
+	for index, imageURL := range transcript.Images[:limit] {
+		report(startProgress+index, totalProgress, fmt.Sprintf("Downloading image %d of %d", index+1, limit))
+		resolvedURL, err := resolveMediaURL(transcript.SourceURL, imageURL)
+		if err != nil {
+			transcript.Warnings = append(transcript.Warnings, fmt.Sprintf("Skipped image %q: %v", imageURL, err))
+			continue
+		}
+		asset, err := s.cacheMediaAsset(ctx, resolvedURL, &sourceItemRef, proxyURL)
+		if err != nil {
+			transcript.Warnings = append(transcript.Warnings, fmt.Sprintf("Could not cache image %q: %v", resolvedURL, err))
+			continue
+		}
+		asset.PublicURL = mediaPublicURL(asset.ID)
+		transcript.MediaAssets = append(transcript.MediaAssets, asset)
+		cachedImages = append(cachedImages, asset.PublicURL)
+	}
+	report(startProgress+limit, totalProgress, "Media cache updated")
+
+	transcript.Images = cachedImages
+	if len(cachedImages) > 0 {
+		transcript.Inferred.CoverImage = cachedImages[0]
+	} else {
+		transcript.Inferred.CoverImage = ""
+	}
+	return transcript
+}
+
+func (s *Server) cacheMediaAsset(ctx context.Context, rawURL string, sourceItemID *int64, proxyURL string) (domain.MediaAsset, error) {
+	body, contentType, err := fetchBytes(ctx, rawURL, proxyURL, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", maxMediaBytes)
+	if err != nil {
+		return domain.MediaAsset{}, err
+	}
+	detectedType := http.DetectContentType(body)
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = detectedType
+	}
+	if !strings.HasPrefix(contentType, "image/") && !strings.HasPrefix(detectedType, "image/") {
+		return domain.MediaAsset{}, fmt.Errorf("downloaded content is %s, not an image", firstNonEmpty(contentType, detectedType))
+	}
+
+	sum := sha256.Sum256(body)
+	hash := hex.EncodeToString(sum[:])
+	ext := mediaExtension(rawURL, contentType, detectedType)
+	dir := filepath.Join(s.store.DataDir(), "media", "f95zone", "images", hash[:2])
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return domain.MediaAsset{}, err
+	}
+	localPath := filepath.Join(dir, hash+ext)
+	if _, err := os.Stat(localPath); errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(localPath, body, 0o644); err != nil {
+			return domain.MediaAsset{}, err
+		}
+	} else if err != nil {
+		return domain.MediaAsset{}, err
+	}
+	abs, err := filepath.Abs(localPath)
+	if err != nil {
+		abs = localPath
+	}
+
+	return s.store.CreateMediaAsset(ctx, domain.MediaAsset{
+		SourceItemID: sourceItemID,
+		Type:         "image",
+		LocalPath:    abs,
+		OriginalURL:  rawURL,
+		Hash:         hash,
+	})
+}
+
+func (s *Server) safeDataPath(localPath string) (string, error) {
+	dataDir, err := filepath.Abs(s.store.DataDir())
+	if err != nil {
+		return "", err
+	}
+	absPath, err := filepath.Abs(localPath)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(dataDir, absPath)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("media path is outside data directory")
+	}
+	return absPath, nil
+}
+
+func (s *Server) deleteDataFiles(paths []string) error {
+	seen := map[string]bool{}
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		safePath, err := s.safeDataPath(path)
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(safePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+type importF95zoneRequest struct {
+	SourceID   *int64 `json:"source_id"`
+	URL        string `json:"url"`
+	HTML       string `json:"html"`
+	ProxyURL   string `json:"proxy_url"`
+	CreateGame bool   `json:"create_game"`
+}
+
+func fetchURL(ctx context.Context, rawURL string, proxyURL string) ([]byte, error) {
+	body, _, err := fetchBytes(ctx, rawURL, proxyURL, "text/html,application/xhtml+xml", maxHTMLBytes)
+	return body, err
+}
+
+func fetchBytes(ctx context.Context, rawURL string, proxyURL string, accept string, maxBytes int64) ([]byte, string, error) {
+	transport := &http.Transport{}
+	if proxyURL != "" {
+		parsedProxy, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, "", fmt.Errorf("parse proxy url: %w", err)
+		}
+		if strings.HasPrefix(parsedProxy.Scheme, "socks5") {
+			dialer, err := socks5Dialer(parsedProxy)
+			if err != nil {
+				return nil, "", err
+			}
+			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				type contextDialer interface {
+					DialContext(context.Context, string, string) (net.Conn, error)
+				}
+				if d, ok := dialer.(contextDialer); ok {
+					return d.DialContext(ctx, network, address)
+				}
+				return dialer.Dial(network, address)
+			}
+		} else {
+			transport.Proxy = http.ProxyURL(parsedProxy)
+		}
+	}
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   45 * time.Second,
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("User-Agent", "Ludex/0.1 (+local)")
+	req.Header.Set("Accept", accept)
+	if referer := refererForURL(rawURL); referer != "" {
+		req.Header.Set("Referer", referer)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, "", fmt.Errorf("fetch %s: %s", rawURL, resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, "", fmt.Errorf("download exceeds %d bytes", maxBytes)
+	}
+	contentType := strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0])
+	return body, contentType, nil
+}
+
+func socks5Dialer(proxyURL *url.URL) (proxy.Dialer, error) {
+	var auth *proxy.Auth
+	if proxyURL.User != nil {
+		auth = &proxy.Auth{User: proxyURL.User.Username()}
+		if password, ok := proxyURL.User.Password(); ok {
+			auth.Password = password
+		}
+	}
+	return proxy.SOCKS5("tcp", proxyURL.Host, auth, proxy.Direct)
+}
+
+func mediaPublicURL(id int64) string {
+	return fmt.Sprintf("/api/media/%d/content", id)
+}
+
+func resolveMediaURL(baseURL string, mediaURL string) (string, error) {
+	mediaURL = strings.TrimSpace(mediaURL)
+	if mediaURL == "" {
+		return "", errors.New("empty media URL")
+	}
+	if strings.HasPrefix(mediaURL, "/api/media/") {
+		return "", errors.New("media is already cached")
+	}
+	if strings.HasPrefix(mediaURL, "//") {
+		if base, err := url.Parse(baseURL); err == nil && base.Scheme != "" {
+			return base.Scheme + ":" + mediaURL, nil
+		}
+		return "https:" + mediaURL, nil
+	}
+	parsed, err := url.Parse(mediaURL)
+	if err != nil {
+		return "", err
+	}
+	if parsed.IsAbs() {
+		return parsed.String(), nil
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return "", fmt.Errorf("relative image URL %q has no usable base URL", mediaURL)
+	}
+	return base.ResolveReference(parsed).String(), nil
+}
+
+func mediaExtension(rawURL string, contentTypes ...string) string {
+	for _, contentType := range contentTypes {
+		if contentType == "" {
+			continue
+		}
+		extensions, err := mime.ExtensionsByType(contentType)
+		if err == nil && len(extensions) > 0 {
+			if extensions[0] == ".jpe" {
+				return ".jpg"
+			}
+			return extensions[0]
+		}
+	}
+	if parsed, err := url.Parse(rawURL); err == nil {
+		ext := strings.ToLower(filepath.Ext(parsed.Path))
+		switch ext {
+		case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg":
+			return ext
+		}
+	}
+	return ".img"
+}
+
+func refererForURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host + "/"
+}
+
+func importTaskTitle(req importF95zoneRequest) string {
+	if req.URL != "" {
+		return "Import F95zone: " + req.URL
+	}
+	if req.SourceID != nil {
+		return fmt.Sprintf("Import F95zone source #%d", *req.SourceID)
+	}
+	return "Import pasted F95zone HTML"
+}
+
+func f95zoneTaskDedupeKey(req importF95zoneRequest) string {
+	externalID := f95zone.InferExternalID(req.URL)
+	if externalID == "" {
+		return ""
+	}
+	return "f95zone:" + externalID
+}
+
+func minInt(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func transcriptFromMap(value map[string]any) (domain.Transcript, error) {
+	var transcript domain.Transcript
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return transcript, err
+	}
+	if err := json.Unmarshal(raw, &transcript); err != nil {
+		return transcript, err
+	}
+	return transcript, nil
+}
+
+func structToMap(value any) (map[string]any, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func decodeJSON(r *http.Request, target any) error {
+	defer r.Body.Close()
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 4<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	return nil
+}
+
+func urlParamInt(r *http.Request, key string) (int64, error) {
+	value := chi.URLParam(r, key)
+	id, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("invalid %s", key)
+	}
+	return id, nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeError(w http.ResponseWriter, err error) {
+	status := http.StatusBadRequest
+	if errors.Is(err, sql.ErrNoRows) {
+		status = http.StatusNotFound
+	}
+	writeJSON(w, status, map[string]any{
+		"error": err.Error(),
+	})
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func containsFold(values []string, needle string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(needle)) {
+			return true
+		}
+	}
+	return false
+}

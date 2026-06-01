@@ -1,0 +1,11 @@
+.DS_Store
+.data/
+dist/
+node_modules/
+.node_modules_broken/
+backend/game-meta-browser
+backend/bin/
+frontend/dist/
+frontend/node_modules/
+*.log
+*.tsbuildinfo
