@@ -672,6 +672,27 @@ WHERE id = ?`, id)
 	return scanMediaAsset(row)
 }
 
+func (s *Store) ListMediaAssetsForSourceItem(ctx context.Context, sourceItemID int64) ([]domain.MediaAsset, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, game_id, source_item_id, type, local_path, original_url, hash, created_at
+FROM media_assets
+WHERE source_item_id = ?
+ORDER BY id`, sourceItemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	assets := []domain.MediaAsset{}
+	for rows.Next() {
+		asset, err := scanMediaAsset(rows)
+		if err != nil {
+			return nil, err
+		}
+		assets = append(assets, asset)
+	}
+	return assets, rows.Err()
+}
+
 func (s *Store) SetMediaAssetsGameForSourceItem(ctx context.Context, sourceItemID int64, gameID int64) error {
 	_, err := s.db.ExecContext(ctx, `
 UPDATE media_assets

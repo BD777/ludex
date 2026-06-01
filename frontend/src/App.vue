@@ -149,6 +149,8 @@ const lastImportTaskId = ref<number | null>(null);
 const selectedTaskSourceItemId = ref<number | null>(null);
 const pendingDelete = ref<DeleteTarget | null>(null);
 const deleting = ref(false);
+const previewImage = ref("");
+const mediaRetrying = ref(false);
 let noticeTimer: number | undefined;
 
 const importDraftStorageKey = "gmb.importDraft.v1";
@@ -207,7 +209,7 @@ const keyValues = computed(() => {
 });
 
 const previewImages = computed(() => {
-  return selectedTranscript.value.images?.slice(0, 8) ?? [];
+  return transcriptImageList(selectedTranscript.value);
 });
 
 const activeTasks = computed(() => tasks.value.filter(isTaskActive));
@@ -219,7 +221,7 @@ const recentImportTask = computed(() => {
 const recentImportImages = computed(() => {
   const result = recentImportTask.value?.result_json;
   const transcript = result?.transcript ?? result?.item?.parsed_json;
-  return transcript?.images?.slice(0, 5) ?? [];
+  return transcriptImageList(transcript);
 });
 
 const selectedAdapter = computed(() => {
@@ -251,7 +253,21 @@ const selectedTaskSourceTranscript = computed(() => {
 });
 
 const selectedTaskSourceImages = computed(() => {
-  return selectedTaskSourceTranscript.value.images?.slice(0, 8) ?? [];
+  return transcriptImageList(selectedTaskSourceTranscript.value);
+});
+
+const selectedMatchedGame = computed(() => {
+  const gameID = selectedItem.value?.matched_game_id;
+  return gameID ? games.value.find((game) => game.id === gameID) ?? null : null;
+});
+
+const availableMatchGames = computed(() => {
+  const currentID = selectedItem.value?.matched_game_id;
+  return games.value.filter((game) => game.id !== currentID);
+});
+
+const canApplyMatch = computed(() => {
+  return matchGameId.value !== "" && Number(matchGameId.value) !== selectedItem.value?.matched_game_id;
 });
 
 const selectedTaskSourceKeyValues = computed(() => {
@@ -423,20 +439,102 @@ async function createGameFromItem(item: SourceItem) {
 }
 
 async function matchItem(item: SourceItem) {
+  if (!canApplyMatch.value) {
+    return;
+  }
   error.value = "";
   clearNotice();
-  const gameId = matchGameId.value ? Number(matchGameId.value) : undefined;
+  const gameId = Number(matchGameId.value);
+  const wasMatched = Boolean(item.matched_game_id);
   try {
     const updated = await api<SourceItem>(`/api/source-items/${item.id}/match`, {
       method: "POST",
       body: JSON.stringify({ game_id: gameId })
     });
     selectedItem.value = updated;
-    showNotice("Matched");
+    matchGameId.value = "";
+    showNotice(wasMatched ? "Match updated" : "Matched");
     await loadAll();
   } catch (err) {
     error.value = toMessage(err);
   }
+}
+
+async function unmatchItem(item: SourceItem) {
+  error.value = "";
+  clearNotice();
+  try {
+    const updated = await api<SourceItem>(`/api/source-items/${item.id}/match`, {
+      method: "POST",
+      body: JSON.stringify({ game_id: null })
+    });
+    selectedItem.value = updated;
+    matchGameId.value = "";
+    showNotice("Unmatched");
+    await loadAll();
+  } catch (err) {
+    error.value = toMessage(err);
+  }
+}
+
+async function retryItemImages(item: SourceItem) {
+  error.value = "";
+  clearNotice();
+  mediaRetrying.value = true;
+  try {
+    const result = await api<{ task: Task; duplicate?: boolean }>(`/api/source-items/${item.id}/retry-media`, {
+      method: "POST",
+      body: JSON.stringify({ proxy_url: importDraft.proxy_url.trim() })
+    });
+    selectedTask.value = result.task;
+    showNotice(result.duplicate ? "Image retry already running" : "Image retry started");
+    await loadTasks();
+  } catch (err) {
+    error.value = toMessage(err);
+  } finally {
+    mediaRetrying.value = false;
+  }
+}
+
+async function setGameCoverFromImage(image: string) {
+  if (!selectedMatchedGame.value) {
+    return;
+  }
+  const game = selectedMatchedGame.value;
+  error.value = "";
+  clearNotice();
+  try {
+    const saved = await api<Game>(`/api/games/${game.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        ...game,
+        cover_image: image
+      })
+    });
+    games.value = games.value.map((entry) => (entry.id === saved.id ? saved : entry));
+    if (selectedGame.value?.id === saved.id) {
+      editGame(saved);
+    }
+    showNotice("Cover updated");
+  } catch (err) {
+    error.value = toMessage(err);
+  }
+}
+
+function openMatchedGame() {
+  if (!selectedMatchedGame.value) {
+    return;
+  }
+  editGame(selectedMatchedGame.value);
+  view.value = "games";
+}
+
+function openImagePreview(image: string) {
+  previewImage.value = image;
+}
+
+function closeImagePreview() {
+  previewImage.value = "";
 }
 
 function requestDeleteGame(game: Game) {
@@ -586,6 +684,19 @@ function sourceItemLabel(item: SourceItem) {
 
 function sourceItemRawURL(item: SourceItem) {
   return `/api/source-items/${item.id}/raw`;
+}
+
+function transcriptImageList(transcript?: Transcript | null) {
+  const images: string[] = [];
+  const add = (value?: string) => {
+    if (value && !images.includes(value)) {
+      images.push(value);
+    }
+  };
+  add(transcript?.fields?.cover_image);
+  transcript?.fields?.screenshots?.forEach(add);
+  transcript?.images?.forEach(add);
+  return images;
 }
 
 function formatList(values?: string[]) {
@@ -904,7 +1015,15 @@ onUnmounted(() => {
               <strong>{{ taskProgress(recentImportTask) }}%</strong>
             </div>
             <div v-if="recentImportImages.length" class="image-strip compact">
-              <img v-for="image in recentImportImages" :key="image" :src="image" alt="" />
+              <button
+                v-for="image in recentImportImages"
+                :key="image"
+                class="image-thumb"
+                type="button"
+                @click="openImagePreview(image)"
+              >
+                <img :src="image" alt="" />
+              </button>
             </div>
             <div class="result-actions">
               <strong v-if="taskResultTitle(recentImportTask)" class="result-title">
@@ -1048,7 +1167,15 @@ onUnmounted(() => {
 
             <div v-if="selectedTaskSourceItem" class="source-record-panel">
               <div v-if="selectedTaskSourceImages.length" class="image-strip compact">
-                <img v-for="image in selectedTaskSourceImages" :key="image" :src="image" alt="" />
+                <button
+                  v-for="image in selectedTaskSourceImages"
+                  :key="image"
+                  class="image-thumb"
+                  type="button"
+                  @click="openImagePreview(image)"
+                >
+                  <img :src="image" alt="" />
+                </button>
               </div>
               <div class="meta-grid">
                 <div>
@@ -1132,27 +1259,57 @@ onUnmounted(() => {
         <div v-if="selectedItem" class="detail-pane transcript-pane">
           <div class="pane-title">
             <h2>{{ selectedItem.title }}</h2>
-            <button class="secondary" @click="createGameFromItem(selectedItem)">
-              <Icon name="plus" :size="17" />
-              <span>Game</span>
-            </button>
+            <div class="button-row">
+              <button v-if="selectedMatchedGame" class="secondary" @click="openMatchedGame">
+                <Icon name="eye" :size="17" />
+                <span>Game</span>
+              </button>
+              <button v-else class="secondary" @click="createGameFromItem(selectedItem)">
+                <Icon name="plus" :size="17" />
+                <span>Game</span>
+              </button>
+              <button class="secondary" :disabled="mediaRetrying" @click="retryItemImages(selectedItem)">
+                <Icon name="refresh" :size="17" />
+                <span>{{ mediaRetrying ? "Retrying" : "Retry images" }}</span>
+              </button>
+            </div>
           </div>
 
           <div class="match-bar">
+            <span v-if="selectedMatchedGame" class="match-current">
+              Matched to <strong>{{ selectedMatchedGame.title }}</strong>
+            </span>
             <select v-model="matchGameId">
-              <option value="">Unmatched</option>
-              <option v-for="game in games" :key="game.id" :value="game.id">
+              <option value="">{{ selectedMatchedGame ? "Change match..." : "Select game..." }}</option>
+              <option v-for="game in availableMatchGames" :key="game.id" :value="game.id">
                 {{ game.title }}
               </option>
             </select>
-            <button class="secondary" @click="matchItem(selectedItem)">
+            <button class="secondary" :disabled="!canApplyMatch" @click="matchItem(selectedItem)">
               <Icon name="cable" :size="17" />
-              <span>Match</span>
+              <span>{{ selectedMatchedGame ? "Change" : "Match" }}</span>
+            </button>
+            <button v-if="selectedMatchedGame" class="secondary" @click="unmatchItem(selectedItem)">
+              <Icon name="x" :size="17" />
+              <span>Unmatch</span>
             </button>
           </div>
 
           <div v-if="previewImages.length" class="image-strip">
-            <img v-for="image in previewImages" :key="image" :src="image" alt="" />
+            <div v-for="image in previewImages" :key="image" class="image-card">
+              <button class="image-thumb" type="button" @click="openImagePreview(image)">
+                <img :src="image" alt="" />
+                <span v-if="image === selectedTranscript.fields?.cover_image" class="image-badge">Cover</span>
+              </button>
+              <button
+                v-if="selectedMatchedGame && selectedMatchedGame.cover_image !== image"
+                class="image-action"
+                type="button"
+                @click="setGameCoverFromImage(image)"
+              >
+                Set cover
+              </button>
+            </div>
           </div>
 
           <div class="meta-grid">
@@ -1285,6 +1442,15 @@ onUnmounted(() => {
         </div>
       </section>
     </main>
+
+    <div v-if="previewImage" class="preview-layer" @click.self="closeImagePreview">
+      <div class="preview-popover" role="dialog" aria-modal="true" aria-label="Image preview">
+        <button class="icon-button preview-close" title="Close preview" @click="closeImagePreview">
+          <Icon name="x" :size="18" />
+        </button>
+        <img :src="previewImage" alt="" />
+      </div>
+    </div>
 
     <Transition name="toast">
       <div v-if="notice" class="toast-layer" role="status" aria-live="polite">

@@ -635,8 +635,17 @@ textarea:focus {
 
 .match-bar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
+}
+
+.match-current {
+  grid-column: 1 / -1;
+  color: #667269;
+}
+
+.match-current strong {
+  color: #1c2621;
 }
 
 .image-strip {
@@ -645,12 +654,61 @@ textarea:focus {
   gap: 8px;
 }
 
-.image-strip img {
+.image-card {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.image-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 7px;
+  background: #e6e0d5;
+}
+
+.image-thumb img {
+  display: block;
   width: 100%;
   aspect-ratio: 4 / 3;
-  border-radius: 7px;
   object-fit: cover;
-  background: #e6e0d5;
+}
+
+.image-thumb:hover img {
+  filter: brightness(0.92);
+}
+
+.image-badge,
+.image-action {
+  min-height: 28px;
+  border-radius: 7px;
+  font-size: 0.78rem;
+  font-weight: 760;
+}
+
+.image-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  color: #ffffff;
+  background: rgba(31, 53, 47, 0.84);
+}
+
+.image-action {
+  width: 100%;
+  color: #243d35;
+  background: #e8eee6;
+}
+
+.image-action:hover {
+  background: #dce8dc;
 }
 
 .image-strip.compact {
@@ -744,6 +802,40 @@ dd {
 
 .open-link {
   justify-self: start;
+}
+
+.preview-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(16, 24, 21, 0.74);
+}
+
+.preview-popover {
+  position: relative;
+  display: grid;
+  max-width: min(1100px, 96vw);
+  max-height: 92vh;
+}
+
+.preview-popover img {
+  max-width: 100%;
+  max-height: 92vh;
+  border-radius: 8px;
+  object-fit: contain;
+  background: #111815;
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.38);
+}
+
+.preview-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 1;
+  background: rgba(251, 250, 247, 0.92);
 }
 
 .toast-layer {
@@ -896,7 +988,8 @@ dd {
   }
 
   .two-column,
-  .meta-grid {
+  .meta-grid,
+  .match-bar {
     grid-template-columns: 1fr;
   }
 }

@@ -67,6 +67,7 @@ func New(store *storage.Store) http.Handler {
 	r.Get("/api/source-items/{itemID}/raw", server.serveSourceItemRaw)
 	r.Head("/api/source-items/{itemID}/raw", server.serveSourceItemRaw)
 	r.Delete("/api/source-items/{itemID}", server.deleteSourceItem)
+	r.Post("/api/source-items/{itemID}/retry-media", server.retrySourceItemMedia)
 	r.Post("/api/source-items/{itemID}/create-game", server.createGameFromSourceItem)
 	r.Post("/api/source-items/{itemID}/match", server.matchSourceItem)
 
@@ -428,10 +429,6 @@ func (s *Server) executeF95zoneImport(ctx context.Context, req importF95zoneRequ
 	if replaced {
 		report(4, total, "Updating existing source item")
 	}
-	if err := s.store.DeleteMediaAssetsForSourceItem(ctx, item.ID); err != nil {
-		return importF95zoneResult{}, err
-	}
-
 	transcript = s.cacheTranscriptMedia(ctx, transcript, item.ID, req.ProxyURL, report, 5, total)
 	parsed, err = structToMap(transcript)
 	if err != nil {
@@ -532,6 +529,122 @@ func (s *Server) matchSourceItem(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) retrySourceItemMedia(w http.ResponseWriter, r *http.Request) {
+	itemID, err := urlParamInt(r, "itemID")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var req retryMediaRequest
+	if r.Body != nil {
+		decoder := json.NewDecoder(r.Body)
+		if err := decoder.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, err)
+			return
+		}
+	}
+	item, err := s.store.GetSourceItem(r.Context(), itemID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if item.SourceType != "f95zone" {
+		writeError(w, fmt.Errorf("unsupported source item type %q", item.SourceType))
+		return
+	}
+	dedupeKey := fmt.Sprintf("source-item:%d:media", item.ID)
+	existing, err := s.store.GetActiveTaskByDedupeKey(r.Context(), "retry-media:f95zone", dedupeKey)
+	if err == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"task":      existing,
+			"duplicate": true,
+		})
+		return
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		writeError(w, err)
+		return
+	}
+	task, err := s.store.CreateTask(r.Context(), domain.Task{
+		Kind:      "retry-media:f95zone",
+		DedupeKey: dedupeKey,
+		Status:    "queued",
+		Title:     "Retry images: " + firstNonEmpty(item.Title, item.ExternalID),
+		Message:   "Queued",
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	go s.runF95zoneRetryMediaTask(task.ID, item.ID, req.ProxyURL)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"task":      task,
+		"duplicate": false,
+	})
+}
+
+func (s *Server) runF95zoneRetryMediaTask(taskID int64, itemID int64, proxyURL string) {
+	ctx := context.Background()
+	_, _ = s.store.StartTask(ctx, taskID, "Loading raw HTML")
+	report := func(current int, total int, message string) {
+		_, _ = s.store.UpdateTaskProgress(ctx, taskID, current, total, message)
+	}
+	item, err := s.store.GetSourceItem(ctx, itemID)
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+		return
+	}
+	if item.SourceID != nil && strings.TrimSpace(proxyURL) == "" {
+		source, err := s.store.GetSource(ctx, *item.SourceID)
+		if err != nil {
+			_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+			return
+		}
+		proxyURL = source.ProxyURL
+	}
+	rawPath, err := s.safeDataPath(item.RawContentPath)
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+		return
+	}
+	rawHTML, err := os.ReadFile(rawPath)
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+		return
+	}
+	report(1, 0, "Parsing raw HTML")
+	transcript, err := f95zone.ParseHTML(item.RawURL, bytes.NewReader(rawHTML))
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+		return
+	}
+	total := 3 + minInt(len(transcript.Images), maxCachedImages)
+	transcript = s.cacheTranscriptMedia(ctx, transcript, item.ID, proxyURL, report, 2, total)
+	parsed, err := structToMap(transcript)
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+		return
+	}
+	item, err = s.store.UpdateSourceItemParsedJSON(ctx, item.ID, parsed)
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+		return
+	}
+	if item.MatchedGameID != nil {
+		if err := s.store.SetMediaAssetsGameForSourceItem(ctx, item.ID, *item.MatchedGameID); err != nil {
+			_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+			return
+		}
+	}
+	report(total, total, "Retry complete")
+	result, err := structToMap(importF95zoneResult{Item: item, Transcript: transcript})
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry finished but result could not be stored", err)
+		return
+	}
+	_, _ = s.store.FinishTask(ctx, taskID, "Retry complete", result)
 }
 
 func (s *Server) serveSourceItemRaw(w http.ResponseWriter, r *http.Request) {
@@ -651,6 +764,23 @@ func (s *Server) cacheTranscriptMedia(ctx context.Context, transcript domain.Tra
 	sourceItemRef := sourceItemID
 	cachedImages := []string{}
 	cachedByOriginal := map[string]string{}
+	cachedAssetsByOriginal := map[string]domain.MediaAsset{}
+	if existingAssets, err := s.store.ListMediaAssetsForSourceItem(ctx, sourceItemID); err == nil {
+		for _, asset := range existingAssets {
+			if strings.TrimSpace(asset.OriginalURL) == "" {
+				continue
+			}
+			if safePath, err := s.safeDataPath(asset.LocalPath); err == nil {
+				if _, statErr := os.Stat(safePath); statErr == nil {
+					asset.PublicURL = mediaPublicURL(asset.ID)
+					cachedAssetsByOriginal[asset.OriginalURL] = asset
+					cachedByOriginal[asset.OriginalURL] = asset.PublicURL
+				}
+			}
+		}
+	} else {
+		transcript.Warnings = append(transcript.Warnings, fmt.Sprintf("Could not inspect existing cached images: %v", err))
+	}
 	limit := len(transcript.Images)
 	if limit > maxCachedImages {
 		limit = maxCachedImages
@@ -662,6 +792,13 @@ func (s *Server) cacheTranscriptMedia(ctx context.Context, transcript domain.Tra
 		resolvedURL, err := resolveMediaURL(transcript.SourceURL, imageURL)
 		if err != nil {
 			transcript.Warnings = append(transcript.Warnings, fmt.Sprintf("Skipped image %q: %v", imageURL, err))
+			continue
+		}
+		if cached, ok := cachedAssetsByOriginal[resolvedURL]; ok {
+			transcript.MediaAssets = append(transcript.MediaAssets, cached)
+			cachedImages = append(cachedImages, cached.PublicURL)
+			cachedByOriginal[imageURL] = cached.PublicURL
+			cachedByOriginal[resolvedURL] = cached.PublicURL
 			continue
 		}
 		asset, err := s.cacheMediaAsset(ctx, resolvedURL, &sourceItemRef, proxyURL)
@@ -783,6 +920,10 @@ type importF95zoneRequest struct {
 	HTML       string `json:"html"`
 	ProxyURL   string `json:"proxy_url"`
 	CreateGame bool   `json:"create_game"`
+}
+
+type retryMediaRequest struct {
+	ProxyURL string `json:"proxy_url"`
 }
 
 func fetchURL(ctx context.Context, rawURL string, proxyURL string) ([]byte, error) {
