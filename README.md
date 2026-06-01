@@ -1,12 +1,12 @@
 # Ludex
 
-Local-only game metadata indexer and source browser.
+Local-only game metadata indexer and adapter-backed source browser.
 
 First version:
 
 - Go backend with SQLite storage.
-- Vue frontend for browsing games, sources, and imported source items.
-- F95zone transcript adapter for turning forum thread HTML into structured metadata.
+- Vue frontend for browsing games, built-in adapters, and imported source items.
+- Built-in F95zone transcript adapter for turning forum thread HTML into structured metadata.
 - URL fetch with optional per-import proxy, plus raw HTML paste fallback.
 
 ## Run

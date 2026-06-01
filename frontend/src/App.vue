@@ -82,7 +82,7 @@ type Transcript = {
   warnings?: string[];
 };
 
-type ViewName = "games" | "sources" | "import" | "items" | "tasks";
+type ViewName = "games" | "adapters" | "import" | "items" | "tasks";
 
 type DeleteTarget =
   | {
@@ -131,18 +131,7 @@ const gameDraft = reactive({
   cover_image: ""
 });
 
-const sourceDraft = reactive({
-  name: "F95zone",
-  type: "f95zone",
-  url: "",
-  proxy_url: "",
-  enabled: true,
-  trust_level: 50,
-  config_json: "{}"
-});
-
 const importDraftDefaults = {
-  source_id: "",
   url: "",
   proxy_url: "",
   html: "",
@@ -150,6 +139,20 @@ const importDraftDefaults = {
 };
 
 const importDraft = reactive({ ...importDraftDefaults });
+const selectedAdapterId = ref("f95zone");
+
+const builtInAdapters = [
+  {
+    id: "f95zone",
+    name: "F95zone",
+    kind: "Forum thread",
+    status: "built-in",
+    input: "Thread URL / raw HTML",
+    dedupe: "Thread ID",
+    endpoint: "/api/import/f95zone",
+    attachments: "Cached images"
+  }
+] as const;
 
 const matchGameId = ref("");
 
@@ -185,6 +188,10 @@ const recentImportImages = computed(() => {
   const result = recentImportTask.value?.result_json;
   const transcript = result?.transcript ?? result?.item?.parsed_json;
   return transcript?.images?.slice(0, 5) ?? [];
+});
+
+const selectedAdapter = computed(() => {
+  return builtInAdapters.find((adapter) => adapter.id === selectedAdapterId.value) ?? builtInAdapters[0];
 });
 
 const selectedTaskSourceItems = computed(() => {
@@ -339,27 +346,11 @@ async function saveGame() {
   }
 }
 
-async function saveSource() {
-  error.value = "";
-  clearNotice();
-  try {
-    await api<Source>("/api/sources", {
-      method: "POST",
-      body: JSON.stringify(sourceDraft)
-    });
-    showNotice("Source saved");
-    await loadAll();
-  } catch (err) {
-    error.value = toMessage(err);
-  }
-}
-
 async function runImport() {
   error.value = "";
   clearNotice();
   loading.value = true;
   const payload = {
-    source_id: importDraft.source_id ? Number(importDraft.source_id) : undefined,
     url: importDraft.url.trim(),
     proxy_url: importDraft.proxy_url.trim(),
     html: importDraft.html,
@@ -507,13 +498,6 @@ function openTaskResult(task: Task) {
   }
 }
 
-function applySourceToImport(source: Source) {
-  importDraft.source_id = source.id.toString();
-  importDraft.url = source.url;
-  importDraft.proxy_url = source.proxy_url;
-  view.value = "import";
-}
-
 function isTaskActive(task: Task) {
   return task.status === "queued" || task.status === "running";
 }
@@ -565,7 +549,7 @@ function collectSourceItemsForTask(task: Task) {
 
 function sourceItemLabel(item: SourceItem) {
   const source = item.source_id ? sources.value.find((entry) => entry.id === item.source_id) : null;
-  return source?.name || item.source_type || "Standalone";
+  return source?.name || item.source_type || "Unknown adapter";
 }
 
 function clearImportState() {
@@ -602,7 +586,6 @@ function restoreImportState() {
     try {
       const draft = JSON.parse(savedDraft) as Partial<typeof importDraftDefaults>;
       Object.assign(importDraft, {
-        source_id: typeof draft.source_id === "string" ? draft.source_id : "",
         url: typeof draft.url === "string" ? draft.url : "",
         proxy_url: typeof draft.proxy_url === "string" ? draft.proxy_url : "",
         html: typeof draft.html === "string" ? draft.html : "",
@@ -633,7 +616,6 @@ function persistImportDraft() {
 
 function isImportDraftEmpty() {
   return (
-    importDraft.source_id === importDraftDefaults.source_id &&
     importDraft.url === importDraftDefaults.url &&
     importDraft.proxy_url === importDraftDefaults.proxy_url &&
     importDraft.html === importDraftDefaults.html &&
@@ -690,9 +672,9 @@ onUnmounted(() => {
           <Icon name="database" :size="18" />
           <span>Games</span>
         </button>
-        <button :class="{ active: view === 'sources' }" title="Sources" @click="view = 'sources'">
+        <button :class="{ active: view === 'adapters' }" title="Adapters" @click="view = 'adapters'">
           <Icon name="globe" :size="18" />
-          <span>Sources</span>
+          <span>Adapters</span>
         </button>
         <button :class="{ active: view === 'import' }" title="Import" @click="view = 'import'">
           <Icon name="download" :size="18" />
@@ -792,60 +774,54 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <section v-else-if="view === 'sources'" class="workspace two-column">
+      <section v-else-if="view === 'adapters'" class="workspace two-column">
         <div class="list-pane">
           <div class="pane-title">
-            <h1>Sources</h1>
+            <h1>Adapters</h1>
           </div>
           <button
-            v-for="source in sources"
-            :key="source.id"
+            v-for="adapter in builtInAdapters"
+            :key="adapter.id"
             class="row-button"
-            @click="applySourceToImport(source)"
+            :class="{ selected: selectedAdapterId === adapter.id }"
+            @click="selectedAdapterId = adapter.id"
           >
             <span class="source-dot"></span>
             <span class="row-main">
-              <strong>{{ source.name }}</strong>
-              <small>{{ source.type }} · {{ source.proxy_url || "direct" }}</small>
+              <strong>{{ adapter.name }}</strong>
+              <small>{{ adapter.kind }} · {{ adapter.status }}</small>
             </span>
-            <Icon name="link" :size="16" />
+            <Icon name="cable" :size="16" />
           </button>
         </div>
 
         <div class="detail-pane">
           <div class="pane-title">
-            <h2>New Source</h2>
-            <button class="primary" @click="saveSource">
-              <Icon name="save" :size="17" />
-              <span>Save</span>
-            </button>
+            <h2>{{ selectedAdapter.name }}</h2>
+            <span class="status-pill succeeded">{{ selectedAdapter.status }}</span>
           </div>
-          <label>
-            <span>Name</span>
-            <input v-model="sourceDraft.name" type="text" />
-          </label>
-          <label>
-            <span>Type</span>
-            <select v-model="sourceDraft.type">
-              <option value="f95zone">F95zone</option>
-            </select>
-          </label>
-          <label class="wide">
-            <span>Thread URL</span>
-            <input v-model="sourceDraft.url" type="url" />
-          </label>
-          <label class="wide">
-            <span>Proxy URL</span>
-            <input v-model="sourceDraft.proxy_url" type="text" placeholder="socks5://127.0.0.1:7890" />
-          </label>
-          <label>
-            <span>Trust</span>
-            <input v-model.number="sourceDraft.trust_level" min="0" max="100" type="number" />
-          </label>
-          <label class="toggle-row">
-            <input v-model="sourceDraft.enabled" type="checkbox" />
-            <span>Enabled</span>
-          </label>
+          <dl class="meta-grid">
+            <div>
+              <span>Adapter key</span>
+              <strong>{{ selectedAdapter.id }}</strong>
+            </div>
+            <div>
+              <span>Input</span>
+              <strong>{{ selectedAdapter.input }}</strong>
+            </div>
+            <div>
+              <span>Dedupe</span>
+              <strong>{{ selectedAdapter.dedupe }}</strong>
+            </div>
+            <div>
+              <span>Attachments</span>
+              <strong>{{ selectedAdapter.attachments }}</strong>
+            </div>
+            <div>
+              <span>Endpoint</span>
+              <strong>{{ selectedAdapter.endpoint }}</strong>
+            </div>
+          </dl>
         </div>
       </section>
 
@@ -901,12 +877,9 @@ onUnmounted(() => {
             </div>
           </div>
           <label>
-            <span>Source</span>
-            <select v-model="importDraft.source_id">
-              <option value="">Standalone</option>
-              <option v-for="source in sources" :key="source.id" :value="source.id">
-                {{ source.name }}
-              </option>
+            <span>Adapter</span>
+            <select :value="selectedAdapter.id" disabled>
+              <option value="f95zone">F95zone</option>
             </select>
           </label>
           <label class="wide">
@@ -1002,7 +975,7 @@ onUnmounted(() => {
           </section>
 
           <section v-if="selectedTaskSourceItems.length" class="transcript-section source-records">
-            <h3>Source Records</h3>
+            <h3>Adapter Records</h3>
             <div class="subtab-row">
               <button
                 v-for="item in selectedTaskSourceItems"
@@ -1022,7 +995,7 @@ onUnmounted(() => {
               </div>
               <div class="meta-grid">
                 <div>
-                  <span>Source</span>
+                  <span>Adapter</span>
                   <strong>{{ sourceItemLabel(selectedTaskSourceItem) }}</strong>
                 </div>
                 <div>
