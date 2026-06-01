@@ -11,6 +11,8 @@ const props = withDefaults(
 
 const paths: Record<string, string> = {
   activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  "arrow-left": '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+  "arrow-right": '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
   cable: '<path d="M7 7 3 3"/><path d="M9 5 5 9"/><path d="m15 15 4 4"/><path d="m19 15-4 4"/><path d="M8 8h3a5 5 0 0 1 5 5v3"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
   database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',

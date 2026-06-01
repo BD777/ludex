@@ -648,6 +648,13 @@ textarea:focus {
   color: #1c2621;
 }
 
+.match-empty {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  color: #667269;
+}
+
 .image-strip {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
@@ -655,8 +662,7 @@ textarea:focus {
 }
 
 .image-card {
-  display: grid;
-  gap: 6px;
+  position: relative;
   min-width: 0;
 }
 
@@ -669,6 +675,8 @@ textarea:focus {
   overflow: hidden;
   border-radius: 7px;
   background: #e6e0d5;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .image-thumb img {
@@ -676,6 +684,8 @@ textarea:focus {
   width: 100%;
   aspect-ratio: 4 / 3;
   object-fit: cover;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .image-thumb:hover img {
@@ -702,13 +712,36 @@ textarea:focus {
 }
 
 .image-action {
-  width: 100%;
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 8px;
   color: #243d35;
-  background: #e8eee6;
+  background: rgba(251, 250, 247, 0.94);
+  opacity: 0;
+  box-shadow: 0 10px 24px rgba(22, 30, 26, 0.18);
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease,
+    background 160ms ease;
+}
+
+.image-card:hover .image-action,
+.image-card:focus-within .image-action {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
 }
 
 .image-action:hover {
-  background: #dce8dc;
+  background: #ffffff;
 }
 
 .image-strip.compact {
@@ -828,6 +861,8 @@ dd {
   object-fit: contain;
   background: #111815;
   box-shadow: 0 26px 70px rgba(0, 0, 0, 0.38);
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .preview-close {
@@ -836,6 +871,37 @@ dd {
   right: 10px;
   z-index: 1;
   background: rgba(251, 250, 247, 0.92);
+}
+
+.preview-nav {
+  position: absolute;
+  top: 50%;
+  z-index: 1;
+  width: 44px;
+  height: 44px;
+  background: rgba(251, 250, 247, 0.92);
+  transform: translateY(-50%);
+}
+
+.preview-nav.previous {
+  left: 10px;
+}
+
+.preview-nav.next {
+  right: 10px;
+}
+
+.preview-count {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 1;
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: #ffffff;
+  font-size: 0.78rem;
+  font-weight: 720;
+  background: rgba(17, 24, 21, 0.72);
 }
 
 .toast-layer {

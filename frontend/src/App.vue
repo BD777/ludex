@@ -150,6 +150,8 @@ const selectedTaskSourceItemId = ref<number | null>(null);
 const pendingDelete = ref<DeleteTarget | null>(null);
 const deleting = ref(false);
 const previewImage = ref("");
+const previewSequence = ref<string[]>([]);
+const matchEditing = ref(false);
 const mediaRetrying = ref(false);
 let noticeTimer: number | undefined;
 
@@ -212,6 +214,12 @@ const previewImages = computed(() => {
   return transcriptImageList(selectedTranscript.value);
 });
 
+const previewImageIndex = computed(() => {
+  return previewSequence.value.findIndex((image) => image === previewImage.value);
+});
+
+const canStepPreview = computed(() => previewSequence.value.length > 1 && previewImageIndex.value >= 0);
+
 const activeTasks = computed(() => tasks.value.filter(isTaskActive));
 
 const recentImportTask = computed(() => {
@@ -261,13 +269,29 @@ const selectedMatchedGame = computed(() => {
   return gameID ? games.value.find((game) => game.id === gameID) ?? null : null;
 });
 
+const activeCoverImage = computed(() => {
+  return (
+    selectedMatchedGame.value?.cover_image ||
+    selectedTranscript.value.fields?.cover_image ||
+    selectedTranscript.value.inferred?.cover_image ||
+    ""
+  );
+});
+
 const availableMatchGames = computed(() => {
   const currentID = selectedItem.value?.matched_game_id;
   return games.value.filter((game) => game.id !== currentID);
 });
 
 const canApplyMatch = computed(() => {
-  return matchGameId.value !== "" && Number(matchGameId.value) !== selectedItem.value?.matched_game_id;
+  if (!selectedItem.value || matchGameId.value === "") {
+    return false;
+  }
+  const nextGameID = Number(matchGameId.value);
+  if (!Number.isFinite(nextGameID)) {
+    return false;
+  }
+  return availableMatchGames.value.some((game) => game.id === nextGameID);
 });
 
 const selectedTaskSourceKeyValues = computed(() => {
@@ -316,7 +340,8 @@ async function loadLibrary() {
   }
   if (!selectedItem.value && nextItems.length > 0) {
     selectedItem.value = nextItems[0];
-    matchGameId.value = selectedItem.value.matched_game_id?.toString() ?? "";
+    matchGameId.value = "";
+    matchEditing.value = false;
   }
 }
 
@@ -453,24 +478,8 @@ async function matchItem(item: SourceItem) {
     });
     selectedItem.value = updated;
     matchGameId.value = "";
+    matchEditing.value = false;
     showNotice(wasMatched ? "Match updated" : "Matched");
-    await loadAll();
-  } catch (err) {
-    error.value = toMessage(err);
-  }
-}
-
-async function unmatchItem(item: SourceItem) {
-  error.value = "";
-  clearNotice();
-  try {
-    const updated = await api<SourceItem>(`/api/source-items/${item.id}/match`, {
-      method: "POST",
-      body: JSON.stringify({ game_id: null })
-    });
-    selectedItem.value = updated;
-    matchGameId.value = "";
-    showNotice("Unmatched");
     await loadAll();
   } catch (err) {
     error.value = toMessage(err);
@@ -529,12 +538,49 @@ function openMatchedGame() {
   view.value = "games";
 }
 
-function openImagePreview(image: string) {
+function startMatchEdit() {
+  matchEditing.value = true;
+  matchGameId.value = "";
+}
+
+function cancelMatchEdit() {
+  matchEditing.value = false;
+  matchGameId.value = "";
+}
+
+function openImagePreview(image: string, sequence: string[] = previewImages.value) {
   previewImage.value = image;
+  previewSequence.value = sequence.length ? [...sequence] : [image];
 }
 
 function closeImagePreview() {
   previewImage.value = "";
+  previewSequence.value = [];
+}
+
+function stepPreview(direction: 1 | -1) {
+  if (!canStepPreview.value) {
+    return;
+  }
+  const index = previewImageIndex.value;
+  const length = previewSequence.value.length;
+  previewImage.value = previewSequence.value[(index + direction + length) % length];
+}
+
+function handlePreviewKeydown(event: KeyboardEvent) {
+  if (!previewImage.value) {
+    return;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeImagePreview();
+  } else if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    stepPreview(-1);
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    stepPreview(1);
+  }
 }
 
 function requestDeleteGame(game: Game) {
@@ -599,7 +645,8 @@ async function confirmDelete() {
 
 function selectItem(item: SourceItem) {
   selectedItem.value = item;
-  matchGameId.value = item.matched_game_id?.toString() ?? "";
+  matchGameId.value = "";
+  matchEditing.value = false;
 }
 
 function selectTask(task: Task) {
@@ -801,6 +848,7 @@ watch(importDraft, persistImportDraft, { deep: true });
 onMounted(() => {
   restoreImportState();
   void loadAll();
+  window.addEventListener("keydown", handlePreviewKeydown);
   taskPoll = window.setInterval(() => {
     void loadTasks().catch((err) => {
       error.value = toMessage(err);
@@ -815,6 +863,7 @@ onUnmounted(() => {
   if (noticeTimer !== undefined) {
     window.clearTimeout(noticeTimer);
   }
+  window.removeEventListener("keydown", handlePreviewKeydown);
 });
 </script>
 
@@ -1020,9 +1069,9 @@ onUnmounted(() => {
                 :key="image"
                 class="image-thumb"
                 type="button"
-                @click="openImagePreview(image)"
+                @click="openImagePreview(image, recentImportImages)"
               >
-                <img :src="image" alt="" />
+                <img :src="image" alt="" draggable="false" @dragstart.prevent />
               </button>
             </div>
             <div class="result-actions">
@@ -1172,9 +1221,9 @@ onUnmounted(() => {
                   :key="image"
                   class="image-thumb"
                   type="button"
-                  @click="openImagePreview(image)"
+                  @click="openImagePreview(image, selectedTaskSourceImages)"
                 >
-                  <img :src="image" alt="" />
+                  <img :src="image" alt="" draggable="false" @dragstart.prevent />
                 </button>
               </div>
               <div class="meta-grid">
@@ -1262,11 +1311,11 @@ onUnmounted(() => {
             <div class="button-row">
               <button v-if="selectedMatchedGame" class="secondary" @click="openMatchedGame">
                 <Icon name="eye" :size="17" />
-                <span>Game</span>
+                <span>Open game</span>
               </button>
               <button v-else class="secondary" @click="createGameFromItem(selectedItem)">
                 <Icon name="plus" :size="17" />
-                <span>Game</span>
+                <span>Create game</span>
               </button>
               <button class="secondary" :disabled="mediaRetrying" @click="retryItemImages(selectedItem)">
                 <Icon name="refresh" :size="17" />
@@ -1279,35 +1328,51 @@ onUnmounted(() => {
             <span v-if="selectedMatchedGame" class="match-current">
               Matched to <strong>{{ selectedMatchedGame.title }}</strong>
             </span>
-            <select v-model="matchGameId">
-              <option value="">{{ selectedMatchedGame ? "Change match..." : "Select game..." }}</option>
-              <option v-for="game in availableMatchGames" :key="game.id" :value="game.id">
-                {{ game.title }}
-              </option>
-            </select>
-            <button class="secondary" :disabled="!canApplyMatch" @click="matchItem(selectedItem)">
+            <template v-if="!selectedMatchedGame || matchEditing">
+              <select v-if="availableMatchGames.length" v-model="matchGameId">
+                <option value="">{{ selectedMatchedGame ? "Choose another game..." : "Select game..." }}</option>
+                <option v-for="game in availableMatchGames" :key="game.id" :value="game.id">
+                  {{ game.title }}
+                </option>
+              </select>
+              <span v-else class="match-empty">
+                {{ selectedMatchedGame ? "No other games available" : "No games available to match" }}
+              </span>
+              <button
+                v-if="availableMatchGames.length"
+                class="secondary"
+                :disabled="!canApplyMatch"
+                @click="matchItem(selectedItem)"
+              >
+                <Icon name="cable" :size="17" />
+                <span>{{ selectedMatchedGame ? "Apply" : "Match" }}</span>
+              </button>
+              <button v-if="matchEditing" class="secondary" @click="cancelMatchEdit">
+                <Icon name="x" :size="17" />
+                <span>Cancel</span>
+              </button>
+            </template>
+            <button v-else-if="availableMatchGames.length" class="secondary" @click="startMatchEdit">
               <Icon name="cable" :size="17" />
-              <span>{{ selectedMatchedGame ? "Change" : "Match" }}</span>
-            </button>
-            <button v-if="selectedMatchedGame" class="secondary" @click="unmatchItem(selectedItem)">
-              <Icon name="x" :size="17" />
-              <span>Unmatch</span>
+              <span>Change match</span>
             </button>
           </div>
 
           <div v-if="previewImages.length" class="image-strip">
             <div v-for="image in previewImages" :key="image" class="image-card">
-              <button class="image-thumb" type="button" @click="openImagePreview(image)">
-                <img :src="image" alt="" />
-                <span v-if="image === selectedTranscript.fields?.cover_image" class="image-badge">Cover</span>
+              <button class="image-thumb" type="button" @click="openImagePreview(image, previewImages)">
+                <img :src="image" alt="" draggable="false" @dragstart.prevent />
+                <span v-if="image === activeCoverImage" class="image-badge">Cover</span>
               </button>
               <button
-                v-if="selectedMatchedGame && selectedMatchedGame.cover_image !== image"
+                v-if="selectedMatchedGame && activeCoverImage !== image"
                 class="image-action"
                 type="button"
+                title="Set cover"
                 @click="setGameCoverFromImage(image)"
               >
-                Set cover
+                <Icon name="check" :size="14" />
+                <span>Cover</span>
               </button>
             </div>
           </div>
@@ -1448,7 +1513,16 @@ onUnmounted(() => {
         <button class="icon-button preview-close" title="Close preview" @click="closeImagePreview">
           <Icon name="x" :size="18" />
         </button>
-        <img :src="previewImage" alt="" />
+        <button v-if="canStepPreview" class="icon-button preview-nav previous" title="Previous image" @click="stepPreview(-1)">
+          <Icon name="arrow-left" :size="20" />
+        </button>
+        <img :src="previewImage" alt="" draggable="false" @dragstart.prevent />
+        <button v-if="canStepPreview" class="icon-button preview-nav next" title="Next image" @click="stepPreview(1)">
+          <Icon name="arrow-right" :size="20" />
+        </button>
+        <span v-if="canStepPreview" class="preview-count">
+          {{ previewImageIndex + 1 }} / {{ previewSequence.length }}
+        </span>
       </div>
     </div>
 
