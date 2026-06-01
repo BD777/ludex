@@ -72,6 +72,8 @@ type Transcript = {
   key_values?: Record<string, string[]>;
   sections?: Array<{ heading: string; body: string }>;
   images?: string[];
+  media_items?: MediaItem[];
+  media_failures?: MediaFailure[];
   tags?: string[];
   inferred?: {
     game_title?: string;
@@ -81,6 +83,32 @@ type Transcript = {
     cover_image?: string;
   };
   warnings?: string[];
+};
+
+type MediaItem = {
+  position: number;
+  role?: string;
+  status: "cached" | "failed";
+  original_url: string;
+  public_url?: string;
+  error?: string;
+};
+
+type MediaFailure = {
+  position: number;
+  role?: string;
+  original_url: string;
+  error: string;
+};
+
+type MediaEntry = {
+  key: string;
+  position: number;
+  role: string;
+  status: "cached" | "failed";
+  original_url: string;
+  public_url: string;
+  error: string;
 };
 
 type NamedURL = {
@@ -153,6 +181,7 @@ const previewImage = ref("");
 const previewSequence = ref<string[]>([]);
 const matchEditing = ref(false);
 const mediaRetrying = ref(false);
+const retryingMediaURL = ref("");
 let noticeTimer: number | undefined;
 
 const importDraftStorageKey = "gmb.importDraft.v1";
@@ -210,8 +239,12 @@ const keyValues = computed(() => {
   return Object.entries(values);
 });
 
+const previewMediaEntries = computed(() => {
+  return transcriptImageEntries(selectedTranscript.value);
+});
+
 const previewImages = computed(() => {
-  return transcriptImageList(selectedTranscript.value);
+  return previewMediaEntries.value.filter((entry) => entry.status === "cached").map((entry) => entry.public_url);
 });
 
 const previewImageIndex = computed(() => {
@@ -505,6 +538,31 @@ async function retryItemImages(item: SourceItem) {
   }
 }
 
+async function retryItemImage(item: SourceItem, entry: MediaEntry) {
+  if (!entry.original_url) {
+    return;
+  }
+  error.value = "";
+  clearNotice();
+  retryingMediaURL.value = entry.original_url;
+  try {
+    const result = await api<{ task: Task; duplicate?: boolean }>(`/api/source-items/${item.id}/retry-media`, {
+      method: "POST",
+      body: JSON.stringify({
+        proxy_url: importDraft.proxy_url.trim(),
+        original_url: entry.original_url
+      })
+    });
+    selectedTask.value = result.task;
+    showNotice(result.duplicate ? "Image retry already running" : "Image retry started");
+    await loadTasks();
+  } catch (err) {
+    error.value = toMessage(err);
+  } finally {
+    retryingMediaURL.value = "";
+  }
+}
+
 async function setGameCoverFromImage(image: string) {
   if (!selectedMatchedGame.value) {
     return;
@@ -734,6 +792,12 @@ function sourceItemRawURL(item: SourceItem) {
 }
 
 function transcriptImageList(transcript?: Transcript | null) {
+  const mediaItems = transcript?.media_items ?? [];
+  if (mediaItems.length) {
+    return mediaItems
+      .filter((item) => item.status === "cached" && item.public_url)
+      .map((item) => item.public_url as string);
+  }
   const images: string[] = [];
   const add = (value?: string) => {
     if (value && !images.includes(value)) {
@@ -744,6 +808,35 @@ function transcriptImageList(transcript?: Transcript | null) {
   transcript?.fields?.screenshots?.forEach(add);
   transcript?.images?.forEach(add);
   return images;
+}
+
+function transcriptImageEntries(transcript?: Transcript | null): MediaEntry[] {
+  const mediaItems = transcript?.media_items ?? [];
+  if (mediaItems.length) {
+    return mediaItems.map((item, index) => {
+      const position = Number.isFinite(item.position) ? item.position : index;
+      const publicURL = item.public_url ?? "";
+      const originalURL = item.original_url || publicURL;
+      return {
+        key: originalURL || publicURL || `media-${position}`,
+        position,
+        role: item.role || (position === 0 ? "cover" : "screenshot"),
+        status: item.status === "cached" && publicURL ? "cached" : "failed",
+        original_url: originalURL,
+        public_url: publicURL,
+        error: item.error || ""
+      };
+    });
+  }
+  return transcriptImageList(transcript).map((image, index) => ({
+    key: image,
+    position: index,
+    role: index === 0 ? "cover" : "screenshot",
+    status: "cached",
+    original_url: image,
+    public_url: image,
+    error: ""
+  }));
 }
 
 function formatList(values?: string[]) {
@@ -1358,21 +1451,53 @@ onUnmounted(() => {
             </button>
           </div>
 
-          <div v-if="previewImages.length" class="image-strip">
-            <div v-for="image in previewImages" :key="image" class="image-card">
-              <button class="image-thumb" type="button" @click="openImagePreview(image, previewImages)">
-                <img :src="image" alt="" draggable="false" @dragstart.prevent />
-                <span v-if="image === activeCoverImage" class="image-badge">Cover</span>
+          <div v-if="previewMediaEntries.length" class="image-strip">
+            <div
+              v-for="entry in previewMediaEntries"
+              :key="entry.key"
+              class="image-card"
+              :class="{ failed: entry.status === 'failed' }"
+            >
+              <button
+                v-if="entry.status === 'cached'"
+                class="image-thumb"
+                type="button"
+                @click="openImagePreview(entry.public_url, previewImages)"
+              >
+                <img :src="entry.public_url" alt="" draggable="false" @dragstart.prevent />
+                <span v-if="entry.public_url === activeCoverImage" class="image-badge">Cover</span>
               </button>
               <button
-                v-if="selectedMatchedGame && activeCoverImage !== image"
+                v-else
+                class="image-thumb image-placeholder"
+                type="button"
+                :disabled="retryingMediaURL === entry.original_url"
+                @click="retryItemImage(selectedItem, entry)"
+              >
+                <Icon name="refresh" :size="20" />
+                <strong>{{ entry.role === "cover" ? "Cover failed" : "Image failed" }}</strong>
+                <small>{{ retryingMediaURL === entry.original_url ? "Retrying" : "Retry" }}</small>
+              </button>
+              <button
+                v-if="entry.status === 'cached' && selectedMatchedGame && activeCoverImage !== entry.public_url"
                 class="image-action"
                 type="button"
                 title="Set cover"
-                @click="setGameCoverFromImage(image)"
+                @click="setGameCoverFromImage(entry.public_url)"
               >
                 <Icon name="check" :size="14" />
                 <span>Cover</span>
+              </button>
+              <button
+                v-else-if="entry.status === 'failed'"
+                class="image-action"
+                type="button"
+                title="Retry image"
+                :disabled="retryingMediaURL === entry.original_url"
+                @click="retryItemImage(selectedItem, entry)"
+              >
+                <Icon name="refresh" :size="14" />
+                <span>Retry</span>
               </button>
             </div>
           </div>

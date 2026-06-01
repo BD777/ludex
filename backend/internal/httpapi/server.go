@@ -571,21 +571,21 @@ func (s *Server) retrySourceItemMedia(w http.ResponseWriter, r *http.Request) {
 		Kind:      "retry-media:f95zone",
 		DedupeKey: dedupeKey,
 		Status:    "queued",
-		Title:     "Retry images: " + firstNonEmpty(item.Title, item.ExternalID),
+		Title:     retryMediaTaskTitle(item, req.OriginalURL),
 		Message:   "Queued",
 	})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	go s.runF95zoneRetryMediaTask(task.ID, item.ID, req.ProxyURL)
+	go s.runF95zoneRetryMediaTask(task.ID, item.ID, req.ProxyURL, req.OriginalURL)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"task":      task,
 		"duplicate": false,
 	})
 }
 
-func (s *Server) runF95zoneRetryMediaTask(taskID int64, itemID int64, proxyURL string) {
+func (s *Server) runF95zoneRetryMediaTask(taskID int64, itemID int64, proxyURL string, originalURL string) {
 	ctx := context.Background()
 	_, _ = s.store.StartTask(ctx, taskID, "Loading raw HTML")
 	report := func(current int, total int, message string) {
@@ -603,6 +603,10 @@ func (s *Server) runF95zoneRetryMediaTask(taskID int64, itemID int64, proxyURL s
 			return
 		}
 		proxyURL = source.ProxyURL
+	}
+	if strings.TrimSpace(originalURL) != "" {
+		s.runF95zoneSingleMediaRetryTask(ctx, taskID, item, proxyURL, originalURL, report)
+		return
 	}
 	rawPath, err := s.safeDataPath(item.RawContentPath)
 	if err != nil {
@@ -639,6 +643,88 @@ func (s *Server) runF95zoneRetryMediaTask(taskID int64, itemID int64, proxyURL s
 		}
 	}
 	report(total, total, "Retry complete")
+	result, err := structToMap(importF95zoneResult{Item: item, Transcript: transcript})
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry finished but result could not be stored", err)
+		return
+	}
+	_, _ = s.store.FinishTask(ctx, taskID, "Retry complete", result)
+}
+
+func (s *Server) runF95zoneSingleMediaRetryTask(ctx context.Context, taskID int64, item domain.SourceItem, proxyURL string, originalURL string, report progressReporter) {
+	report(1, 4, "Loading media state")
+	transcript, err := transcriptFromMap(item.ParsedJSON)
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+		return
+	}
+	targetIndex := findMediaItemIndex(transcript.MediaItems, originalURL)
+	if targetIndex < 0 {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry failed", fmt.Errorf("image is not tracked on this item"))
+		return
+	}
+
+	target := transcript.MediaItems[targetIndex]
+	resolvedURL, err := resolveMediaURL(firstNonEmpty(transcript.SourceURL, item.RawURL), target.OriginalURL)
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+		return
+	}
+
+	sourceItemRef := item.ID
+	var asset domain.MediaAsset
+	if cached, ok := s.findCachedMediaAsset(ctx, item.ID, resolvedURL); ok {
+		report(2, 4, "Using cached image")
+		asset = cached
+	} else {
+		report(2, 4, "Downloading image")
+		asset, err = s.cacheMediaAsset(ctx, resolvedURL, &sourceItemRef, proxyURL)
+		if err != nil {
+			transcript.MediaItems[targetIndex] = failedMediaItem(target.Position, firstNonEmpty(target.Role, mediaRole(target.Position)), resolvedURL, err)
+			transcript = rebuildTranscriptMediaState(transcript)
+			if parsed, parseErr := structToMap(transcript); parseErr == nil {
+				_, _ = s.store.UpdateSourceItemParsedJSON(ctx, item.ID, parsed)
+			}
+			_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+			return
+		}
+		asset.PublicURL = mediaPublicURL(asset.ID)
+	}
+
+	report(3, 4, "Updating item")
+	transcript.MediaItems[targetIndex] = domain.MediaItem{
+		Position:    target.Position,
+		Role:        firstNonEmpty(target.Role, mediaRole(target.Position)),
+		Status:      "cached",
+		OriginalURL: resolvedURL,
+		PublicURL:   asset.PublicURL,
+	}
+	transcript.MediaAssets = upsertTranscriptMediaAsset(transcript.MediaAssets, asset)
+	transcript = rebuildTranscriptMediaState(transcript)
+	parsed, err := structToMap(transcript)
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+		return
+	}
+	item, err = s.store.UpdateSourceItemParsedJSON(ctx, item.ID, parsed)
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+		return
+	}
+	if item.MatchedGameID != nil {
+		if err := s.store.SetMediaAssetsGameForSourceItem(ctx, item.ID, *item.MatchedGameID); err != nil {
+			_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+			return
+		}
+		if transcript.MediaItems[targetIndex].Role == "cover" {
+			if game, err := s.store.GetGame(ctx, *item.MatchedGameID); err == nil {
+				game.CoverImage = asset.PublicURL
+				_, _ = s.store.UpdateGame(ctx, game.ID, game)
+			}
+		}
+	}
+
+	report(4, 4, "Retry complete")
 	result, err := structToMap(importF95zoneResult{Item: item, Transcript: transcript})
 	if err != nil {
 		_, _ = s.store.FailTask(ctx, taskID, "Retry finished but result could not be stored", err)
@@ -762,8 +848,9 @@ func (s *Server) cacheTranscriptMedia(ctx context.Context, transcript domain.Tra
 	}
 
 	sourceItemRef := sourceItemID
-	cachedImages := []string{}
-	cachedByOriginal := map[string]string{}
+	transcript.MediaItems = []domain.MediaItem{}
+	transcript.MediaFailures = []domain.MediaFailure{}
+	transcript.MediaAssets = []domain.MediaAsset{}
 	cachedAssetsByOriginal := map[string]domain.MediaAsset{}
 	if existingAssets, err := s.store.ListMediaAssetsForSourceItem(ctx, sourceItemID); err == nil {
 		for _, asset := range existingAssets {
@@ -774,7 +861,6 @@ func (s *Server) cacheTranscriptMedia(ctx context.Context, transcript domain.Tra
 				if _, statErr := os.Stat(safePath); statErr == nil {
 					asset.PublicURL = mediaPublicURL(asset.ID)
 					cachedAssetsByOriginal[asset.OriginalURL] = asset
-					cachedByOriginal[asset.OriginalURL] = asset.PublicURL
 				}
 			}
 		}
@@ -789,50 +875,143 @@ func (s *Server) cacheTranscriptMedia(ctx context.Context, transcript domain.Tra
 
 	for index, imageURL := range transcript.Images[:limit] {
 		report(startProgress+index, totalProgress, fmt.Sprintf("Downloading image %d of %d", index+1, limit))
+		role := mediaRole(index)
 		resolvedURL, err := resolveMediaURL(transcript.SourceURL, imageURL)
 		if err != nil {
-			transcript.Warnings = append(transcript.Warnings, fmt.Sprintf("Skipped image %q: %v", imageURL, err))
+			transcript.MediaItems = append(transcript.MediaItems, failedMediaItem(index, role, imageURL, err))
 			continue
 		}
 		if cached, ok := cachedAssetsByOriginal[resolvedURL]; ok {
 			transcript.MediaAssets = append(transcript.MediaAssets, cached)
-			cachedImages = append(cachedImages, cached.PublicURL)
-			cachedByOriginal[imageURL] = cached.PublicURL
-			cachedByOriginal[resolvedURL] = cached.PublicURL
+			transcript.MediaItems = append(transcript.MediaItems, domain.MediaItem{
+				Position:    index,
+				Role:        role,
+				Status:      "cached",
+				OriginalURL: resolvedURL,
+				PublicURL:   cached.PublicURL,
+			})
 			continue
 		}
 		asset, err := s.cacheMediaAsset(ctx, resolvedURL, &sourceItemRef, proxyURL)
 		if err != nil {
-			transcript.Warnings = append(transcript.Warnings, fmt.Sprintf("Could not cache image %q: %v", resolvedURL, err))
+			transcript.MediaItems = append(transcript.MediaItems, failedMediaItem(index, role, resolvedURL, err))
 			continue
 		}
 		asset.PublicURL = mediaPublicURL(asset.ID)
 		transcript.MediaAssets = append(transcript.MediaAssets, asset)
-		cachedImages = append(cachedImages, asset.PublicURL)
-		cachedByOriginal[imageURL] = asset.PublicURL
-		cachedByOriginal[resolvedURL] = asset.PublicURL
+		transcript.MediaItems = append(transcript.MediaItems, domain.MediaItem{
+			Position:    index,
+			Role:        role,
+			Status:      "cached",
+			OriginalURL: resolvedURL,
+			PublicURL:   asset.PublicURL,
+		})
 	}
 	report(startProgress+limit, totalProgress, "Media cache updated")
 
-	transcript.Images = cachedImages
-	if cachedCover := cachedByOriginal[transcript.Fields.CoverImage]; cachedCover != "" {
-		transcript.Fields.CoverImage = cachedCover
-	} else if len(cachedImages) > 0 {
-		transcript.Fields.CoverImage = cachedImages[0]
+	return rebuildTranscriptMediaState(transcript)
+}
+
+func mediaRole(position int) string {
+	if position == 0 {
+		return "cover"
 	}
-	cachedScreenshots := []string{}
-	for _, imageURL := range transcript.Fields.Screenshots {
-		if cached := cachedByOriginal[imageURL]; cached != "" {
-			cachedScreenshots = append(cachedScreenshots, cached)
+	return "screenshot"
+}
+
+func failedMediaItem(position int, role string, originalURL string, err error) domain.MediaItem {
+	return domain.MediaItem{
+		Position:    position,
+		Role:        role,
+		Status:      "failed",
+		OriginalURL: originalURL,
+		Error:       err.Error(),
+	}
+}
+
+func rebuildTranscriptMediaState(transcript domain.Transcript) domain.Transcript {
+	images := []string{}
+	screenshots := []string{}
+	failures := []domain.MediaFailure{}
+	coverImage := ""
+
+	for index := range transcript.MediaItems {
+		item := &transcript.MediaItems[index]
+		if item.Role == "" {
+			item.Role = mediaRole(item.Position)
 		}
+		if item.Status == "cached" && item.PublicURL != "" {
+			images = append(images, item.PublicURL)
+			if item.Role == "cover" {
+				coverImage = item.PublicURL
+			} else {
+				screenshots = append(screenshots, item.PublicURL)
+			}
+			continue
+		}
+		item.Status = "failed"
+		failures = append(failures, domain.MediaFailure{
+			Position:    item.Position,
+			Role:        item.Role,
+			OriginalURL: item.OriginalURL,
+			Error:       item.Error,
+		})
 	}
-	transcript.Fields.Screenshots = cachedScreenshots
-	if transcript.Fields.CoverImage != "" {
-		transcript.Inferred.CoverImage = transcript.Fields.CoverImage
-	} else {
-		transcript.Inferred.CoverImage = ""
+
+	transcript.Images = images
+	if coverImage == "" && len(images) > 0 {
+		coverImage = images[0]
 	}
+	transcript.Fields.CoverImage = coverImage
+	transcript.Fields.Screenshots = screenshots
+	transcript.Inferred.CoverImage = coverImage
+	transcript.MediaFailures = failures
+	transcript.Warnings = mediaWarnings(transcript.Warnings, failures)
 	return transcript
+}
+
+func mediaWarnings(existing []string, failures []domain.MediaFailure) []string {
+	warnings := []string{}
+	for _, warning := range existing {
+		if isMediaCacheWarning(warning) {
+			continue
+		}
+		warnings = append(warnings, warning)
+	}
+	if len(failures) > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d images failed to cache.", len(failures)))
+	}
+	return warnings
+}
+
+func isMediaCacheWarning(warning string) bool {
+	return strings.HasPrefix(warning, "Could not cache image ") ||
+		strings.HasPrefix(warning, "Skipped image ") ||
+		strings.HasPrefix(warning, "Only cached the first ") ||
+		strings.HasPrefix(warning, "Could not inspect existing cached images:") ||
+		strings.HasSuffix(warning, " images failed to cache.")
+}
+
+func (s *Server) findCachedMediaAsset(ctx context.Context, sourceItemID int64, originalURL string) (domain.MediaAsset, bool) {
+	assets, err := s.store.ListMediaAssetsForSourceItem(ctx, sourceItemID)
+	if err != nil {
+		return domain.MediaAsset{}, false
+	}
+	for _, asset := range assets {
+		if strings.TrimSpace(asset.OriginalURL) != strings.TrimSpace(originalURL) {
+			continue
+		}
+		safePath, err := s.safeDataPath(asset.LocalPath)
+		if err != nil {
+			continue
+		}
+		if _, err := os.Stat(safePath); err != nil {
+			continue
+		}
+		asset.PublicURL = mediaPublicURL(asset.ID)
+		return asset, true
+	}
+	return domain.MediaAsset{}, false
 }
 
 func (s *Server) cacheMediaAsset(ctx context.Context, rawURL string, sourceItemID *int64, proxyURL string) (domain.MediaAsset, error) {
@@ -923,7 +1102,8 @@ type importF95zoneRequest struct {
 }
 
 type retryMediaRequest struct {
-	ProxyURL string `json:"proxy_url"`
+	ProxyURL    string `json:"proxy_url"`
+	OriginalURL string `json:"original_url"`
 }
 
 func fetchURL(ctx context.Context, rawURL string, proxyURL string) ([]byte, error) {
@@ -1082,11 +1262,39 @@ func f95zoneTaskDedupeKey(req importF95zoneRequest) string {
 	return "f95zone:" + externalID
 }
 
+func retryMediaTaskTitle(item domain.SourceItem, originalURL string) string {
+	title := firstNonEmpty(item.Title, item.ExternalID)
+	if strings.TrimSpace(originalURL) != "" {
+		return "Retry image: " + title
+	}
+	return "Retry images: " + title
+}
+
 func minInt(a int, b int) int {
 	if a < b {
 		return a
 	}
 	return b
+}
+
+func findMediaItemIndex(items []domain.MediaItem, originalURL string) int {
+	needle := strings.TrimSpace(originalURL)
+	for index, item := range items {
+		if strings.TrimSpace(item.OriginalURL) == needle {
+			return index
+		}
+	}
+	return -1
+}
+
+func upsertTranscriptMediaAsset(assets []domain.MediaAsset, asset domain.MediaAsset) []domain.MediaAsset {
+	for index, existing := range assets {
+		if existing.ID == asset.ID || (existing.OriginalURL != "" && existing.OriginalURL == asset.OriginalURL) {
+			assets[index] = asset
+			return assets
+		}
+	}
+	return append(assets, asset)
 }
 
 func transcriptFromMap(value map[string]any) (domain.Transcript, error) {

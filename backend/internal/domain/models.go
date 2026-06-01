@@ -71,18 +71,36 @@ type Task struct {
 }
 
 type Transcript struct {
-	Source      string              `json:"source"`
-	SourceURL   string              `json:"source_url"`
-	ExternalID  string              `json:"external_id"`
-	Title       string              `json:"title"`
-	Fields      TranscriptFields    `json:"fields"`
-	KeyValues   map[string][]string `json:"key_values"`
-	Sections    []TranscriptSection `json:"sections"`
-	Images      []string            `json:"images"`
-	MediaAssets []MediaAsset        `json:"media_assets"`
-	Tags        []string            `json:"tags"`
-	Inferred    TranscriptInferred  `json:"inferred"`
-	Warnings    []string            `json:"warnings"`
+	Source        string              `json:"source"`
+	SourceURL     string              `json:"source_url"`
+	ExternalID    string              `json:"external_id"`
+	Title         string              `json:"title"`
+	Fields        TranscriptFields    `json:"fields"`
+	KeyValues     map[string][]string `json:"key_values"`
+	Sections      []TranscriptSection `json:"sections"`
+	Images        []string            `json:"images"`
+	MediaItems    []MediaItem         `json:"media_items"`
+	MediaAssets   []MediaAsset        `json:"media_assets"`
+	MediaFailures []MediaFailure      `json:"media_failures"`
+	Tags          []string            `json:"tags"`
+	Inferred      TranscriptInferred  `json:"inferred"`
+	Warnings      []string            `json:"warnings"`
+}
+
+type MediaItem struct {
+	Position    int    `json:"position"`
+	Role        string `json:"role"`
+	Status      string `json:"status"`
+	OriginalURL string `json:"original_url"`
+	PublicURL   string `json:"public_url"`
+	Error       string `json:"error,omitempty"`
+}
+
+type MediaFailure struct {
+	Position    int    `json:"position"`
+	Role        string `json:"role"`
+	OriginalURL string `json:"original_url"`
+	Error       string `json:"error"`
 }
 
 type NamedURL struct {
