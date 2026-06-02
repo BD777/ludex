@@ -30,15 +30,14 @@ Open the Vite URL, usually `http://localhost:5173`.
 
 ## Browser Bridge
 
-Ludex ships one Tampermonkey userscript for importing the currently loaded
-logged-in source page HTML into the local service.
+Ludex ships one Tampermonkey userscript for syncing supported source auth
+profiles into the local service.
 
 - Install from the Ludex `Adapters` page with `Install userscript`.
 - Direct URL: `http://127.0.0.1:8787/userscripts/ludex.user.js`
-- The script detects the current supported source and posts the page URL and
-  HTML to the matching import endpoint.
-- It can also save readable source cookies as local auth profiles. Cookie
-  values are persisted locally but are not returned by the status API.
+- Use the Tampermonkey menu command on a supported source page to sync readable
+  cookies and User-Agent into Ludex.
+- Cookie values are persisted locally but are not returned by the status API.
 
 ## Environment
 

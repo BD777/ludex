@@ -225,7 +225,8 @@ const browserBridge = {
   userscript: "/userscripts/ludex.user.js",
   mode: "Tampermonkey userscript",
   coverage: "F95zone now, more adapters later",
-  install: "Install once"
+  install: "Install once",
+  action: "Use the Tampermonkey menu to sync auth"
 };
 
 const builtInAdapters = [
@@ -1162,6 +1163,10 @@ onUnmounted(() => {
               <div>
                 <span>Install</span>
                 <strong>{{ browserBridge.install }}</strong>
+              </div>
+              <div>
+                <span>Action</span>
+                <strong>{{ browserBridge.action }}</strong>
               </div>
               <div>
                 <span>Userscript</span>

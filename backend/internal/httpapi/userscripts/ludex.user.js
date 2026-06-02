@@ -1,13 +1,12 @@
 // ==UserScript==
 // @name         Ludex Browser Bridge
 // @namespace    http://127.0.0.1:8787/ludex
-// @version      0.2.0
-// @description  Send supported logged-in source pages to local Ludex.
+// @version      0.3.0
+// @description  Sync supported source auth profiles to local Ludex.
 // @author       Ludex
 // @updateURL    http://127.0.0.1:8787/userscripts/ludex.user.js
 // @downloadURL  http://127.0.0.1:8787/userscripts/ludex.user.js
-// @match        https://f95zone.to/threads/*
-// @match        https://f95zone.to/threads/*/
+// @match        https://f95zone.to/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_cookie
 // @grant        GM_registerMenuCommand
@@ -19,7 +18,7 @@
   "use strict";
 
   const LUDEX_BASE_URL = "http://127.0.0.1:8787";
-  const WRAPPER_ID = "ludex-browser-bridge";
+  const TOAST_ID = "ludex-browser-bridge-toast";
   const STYLE_ID = "ludex-browser-bridge-style";
 
   const ADAPTERS = [
@@ -27,16 +26,8 @@
       id: "f95zone",
       name: "F95zone",
       domain: "f95zone.to",
-      endpoint: "/api/import/f95zone",
       matches(location) {
-        return location.hostname === "f95zone.to" && location.pathname.startsWith("/threads/");
-      },
-      buildPayload() {
-        return {
-          url: window.location.href,
-          html: pageHTML(),
-          create_game: true
-        };
+        return location.hostname === "f95zone.to";
       }
     }
   ];
@@ -52,27 +43,17 @@
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-      #${WRAPPER_ID} {
+      #${TOAST_ID} {
         position: fixed;
         right: 18px;
         bottom: 18px;
         z-index: 2147483647;
         display: flex;
-        flex-direction: column;
-        align-items: flex-end;
-        gap: 8px;
-        max-width: min(360px, calc(100vw - 36px));
-      }
-
-      #${WRAPPER_ID} button {
-        display: inline-flex;
         align-items: center;
-        gap: 8px;
         min-height: 38px;
-        max-width: 100%;
+        max-width: min(360px, calc(100vw - 36px));
         padding: 0 13px;
         overflow: hidden;
-        border: 0;
         border-radius: 7px;
         color: #ffffff;
         background: #2f6f57;
@@ -80,46 +61,30 @@
         font: 700 13px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         text-overflow: ellipsis;
         white-space: nowrap;
-        cursor: pointer;
+        pointer-events: none;
       }
 
-      #${WRAPPER_ID} button:hover {
-        background: #265f4a;
-      }
-
-      #${WRAPPER_ID} button[disabled] {
-        cursor: default;
-        opacity: 0.72;
-      }
-
-      #${WRAPPER_ID} button.ludex-secondary {
-        color: #243d35;
-        background: #f3efe6;
-      }
-
-      #${WRAPPER_ID} button.ludex-secondary:hover {
-        background: #e8e1d4;
-      }
-
-      #${WRAPPER_ID} button.ludex-error {
-        color: #ffffff;
+      #${TOAST_ID}.ludex-error {
         background: #a83b3b;
       }
     `;
     document.head.appendChild(style);
   }
 
-  function setButtonState(button, text, state) {
-    button.textContent = text;
-    button.classList.toggle("ludex-error", state === "error");
-    button.disabled = state === "busy";
-  }
-
-  function pageHTML() {
-    const doctype = document.doctype
-      ? `<!DOCTYPE ${document.doctype.name}>`
-      : "<!DOCTYPE html>";
-    return doctype + "\n" + document.documentElement.outerHTML;
+  function showToast(message, state) {
+    installStyle();
+    const previous = document.getElementById(TOAST_ID);
+    if (previous) {
+      previous.remove();
+    }
+    const toast = document.createElement("div");
+    toast.id = TOAST_ID;
+    toast.classList.toggle("ludex-error", state === "error");
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    window.setTimeout(() => {
+      toast.remove();
+    }, state === "error" ? 6000 : 3500);
   }
 
   function postJSON(path, payload) {
@@ -167,10 +132,6 @@
     });
   }
 
-  function postToLudex(adapter, payload) {
-    return postJSON(adapter.endpoint, payload);
-  }
-
   function readableDocumentCookie() {
     return (document.cookie || "").trim();
   }
@@ -207,10 +168,8 @@
     return readableDocumentCookie();
   }
 
-  async function importCookies(adapter, button) {
-    if (button) {
-      setButtonState(button, "Saving cookies...", "busy");
-    }
+  async function syncAuthProfile(adapter) {
+    showToast(`Syncing ${adapter.name} auth...`, "busy");
     try {
       const cookieHeader = await cookieHeaderForAdapter(adapter);
       if (!cookieHeader) {
@@ -224,66 +183,21 @@
         source_url: window.location.href
       });
       const count = result && typeof result.cookie_count === "number" ? result.cookie_count : 0;
-      if (button) {
-        setButtonState(button, `Cookies saved (${count})`, "ok");
-        window.setTimeout(() => setButtonState(button, "Cookies", "idle"), 3500);
-      }
+      showToast(`${adapter.name} auth synced (${count} cookies)`, "ok");
     } catch (err) {
-      if (button) {
-        setButtonState(button, err && err.message ? err.message : "Cookie import failed", "error");
-        window.setTimeout(() => setButtonState(button, "Cookies", "idle"), 6000);
-      } else {
-        window.alert(err && err.message ? err.message : "Cookie import failed");
-      }
+      const message = err && err.message ? err.message : "Auth sync failed";
+      showToast(message, "error");
     }
   }
 
-  async function importCurrentPage(adapter, button) {
-    setButtonState(button, `Sending ${adapter.name} to Ludex...`, "busy");
-    try {
-      const result = await postToLudex(adapter, adapter.buildPayload());
-      const taskID = result && result.task && result.task.id ? ` #${result.task.id}` : "";
-      setButtonState(button, `Imported${taskID}`, "ok");
-      window.setTimeout(() => setButtonState(button, `Import ${adapter.name} to Ludex`, "idle"), 3500);
-    } catch (err) {
-      setButtonState(button, err && err.message ? err.message : "Import failed", "error");
-      window.setTimeout(() => setButtonState(button, `Import ${adapter.name} to Ludex`, "idle"), 6000);
-    }
-  }
-
-  function mountButton(adapter) {
-    if (document.getElementById(WRAPPER_ID)) {
+  function registerMenuCommand(adapter) {
+    if (typeof GM_registerMenuCommand === "function") {
+      GM_registerMenuCommand(`Sync ${adapter.name} auth to Ludex`, () => {
+        void syncAuthProfile(adapter);
+      });
       return;
     }
-    installStyle();
-    const wrapper = document.createElement("div");
-    wrapper.id = WRAPPER_ID;
-
-    const importButton = document.createElement("button");
-    importButton.type = "button";
-    importButton.title = `Send the current ${adapter.name} page HTML to local Ludex`;
-    importButton.textContent = `Import ${adapter.name} to Ludex`;
-    importButton.addEventListener("click", () => {
-      void importCurrentPage(adapter, importButton);
-    });
-
-    const cookieButton = document.createElement("button");
-    cookieButton.type = "button";
-    cookieButton.className = "ludex-secondary";
-    cookieButton.title = `Save readable ${adapter.name} cookies to local Ludex`;
-    cookieButton.textContent = "Cookies";
-    cookieButton.addEventListener("click", () => {
-      void importCookies(adapter, cookieButton);
-    });
-
-    wrapper.append(importButton, cookieButton);
-    document.body.appendChild(wrapper);
-
-    if (typeof GM_registerMenuCommand === "function") {
-      GM_registerMenuCommand(`Import ${adapter.name} cookies to Ludex`, () => {
-        void importCookies(adapter, null);
-      });
-    }
+    console.warn("Ludex Browser Bridge requires Tampermonkey menu command support.");
   }
 
   function boot() {
@@ -291,7 +205,7 @@
     if (!adapter) {
       return;
     }
-    mountButton(adapter);
+    registerMenuCommand(adapter);
   }
 
   if (document.readyState === "loading") {
