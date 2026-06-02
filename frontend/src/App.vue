@@ -164,6 +164,7 @@ type TranscriptFields = {
   languages?: string[];
   genres?: string[];
   changelog?: string;
+  changelog_html?: string;
   download_groups?: DownloadGroup[];
   screenshots?: string[];
 };
@@ -229,7 +230,6 @@ const gameDraft = reactive({
 const importDraftDefaults = {
   url: "",
   proxy_url: "",
-  html: "",
   create_game: true
 };
 
@@ -610,7 +610,6 @@ async function runImport() {
   const payload = {
     url: importDraft.url.trim(),
     proxy_url: importDraft.proxy_url.trim(),
-    html: importDraft.html,
     create_game: importDraft.create_game
   };
   try {
@@ -939,10 +938,6 @@ function sourceItemLabel(item: SourceItem) {
   return source?.name || item.source_type || "Unknown adapter";
 }
 
-function sourceItemRawURL(item: SourceItem) {
-  return `/api/source-items/${item.id}/raw`;
-}
-
 function transcriptImageList(transcript?: Transcript | null) {
   const mediaItems = transcript?.media_items ?? [];
   if (mediaItems.length) {
@@ -1001,6 +996,11 @@ function formatBoolean(value?: boolean | null) {
     return "Unknown";
   }
   return value ? "Yes" : "No";
+}
+
+function displayTranscriptSections(transcript?: Transcript | null) {
+  const hidden = new Set(["overview", "story", "description", "changelog", "change log", "download", "downloads"]);
+  return (transcript?.sections ?? []).filter((section) => !hidden.has(section.heading.trim().toLowerCase()));
 }
 
 function formatTimestamp(value?: string, fallback = "Never") {
@@ -1121,7 +1121,6 @@ function restoreImportState() {
       Object.assign(importDraft, {
         url: typeof draft.url === "string" ? draft.url : "",
         proxy_url: typeof draft.proxy_url === "string" ? draft.proxy_url : "",
-        html: typeof draft.html === "string" ? draft.html : "",
         create_game: typeof draft.create_game === "boolean" ? draft.create_game : true
       });
     } catch {
@@ -1151,7 +1150,6 @@ function isImportDraftEmpty() {
   return (
     importDraft.url === importDraftDefaults.url &&
     importDraft.proxy_url === importDraftDefaults.proxy_url &&
-    importDraft.html === importDraftDefaults.html &&
     importDraft.create_game === importDraftDefaults.create_game
   );
 }
@@ -1473,7 +1471,12 @@ onUnmounted(() => {
 
           <section v-if="selectedGameTranscript.fields?.changelog" class="transcript-section">
             <h3>Changelog</h3>
-            <p>{{ selectedGameTranscript.fields.changelog }}</p>
+            <div
+              v-if="selectedGameTranscript.fields?.changelog_html"
+              class="rich-html"
+              v-html="selectedGameTranscript.fields.changelog_html"
+            ></div>
+            <p v-else>{{ selectedGameTranscript.fields.changelog }}</p>
           </section>
 
           <section v-if="selectedGameKeyValues.length" class="transcript-section">
@@ -1487,7 +1490,7 @@ onUnmounted(() => {
           </section>
 
           <section
-            v-for="section in selectedGameTranscript.sections"
+            v-for="section in displayTranscriptSections(selectedGameTranscript)"
             :key="section.heading"
             class="transcript-section"
           >
@@ -1500,15 +1503,6 @@ onUnmounted(() => {
               <Icon name="file-search" :size="17" />
               <span>Open item</span>
             </button>
-            <a
-              v-if="selectedGameSourceItem?.raw_content_path"
-              class="open-link"
-              :href="sourceItemRawURL(selectedGameSourceItem)"
-              target="_blank"
-            >
-              <Icon name="file-search" :size="17" />
-              <span>Open raw HTML</span>
-            </a>
             <a v-if="selectedGameSourceItem?.raw_url" class="open-link" :href="selectedGameSourceItem.raw_url" target="_blank">
               <Icon name="eye" :size="17" />
               <span>Open source</span>
@@ -1765,15 +1759,6 @@ onUnmounted(() => {
                 <Icon name="activity" :size="17" />
                 <span>Task</span>
               </button>
-              <a
-                v-if="recentImportTask.result_json?.item?.raw_content_path"
-                class="secondary"
-                :href="sourceItemRawURL(recentImportTask.result_json.item)"
-                target="_blank"
-              >
-                <Icon name="file-search" :size="17" />
-                <span>Raw HTML</span>
-              </a>
             </div>
           </div>
           <label>
@@ -1793,10 +1778,6 @@ onUnmounted(() => {
           <label class="toggle-row">
             <input v-model="importDraft.create_game" type="checkbox" />
             <span>Create game</span>
-          </label>
-          <label class="wide">
-            <span>Raw HTML paste fallback</span>
-            <textarea v-model="importDraft.html" rows="16"></textarea>
           </label>
         </div>
       </section>
@@ -1929,15 +1910,6 @@ onUnmounted(() => {
                 </dl>
               </section>
               <div class="result-actions">
-                <a
-                  v-if="selectedTaskSourceItem.raw_content_path"
-                  class="open-link"
-                  :href="sourceItemRawURL(selectedTaskSourceItem)"
-                  target="_blank"
-                >
-                  <Icon name="file-search" :size="17" />
-                  <span>Open raw HTML</span>
-                </a>
                 <a v-if="selectedTaskSourceItem.raw_url" class="open-link" :href="selectedTaskSourceItem.raw_url" target="_blank">
                   <Icon name="eye" :size="17" />
                   <span>Open source</span>
@@ -2129,10 +2101,6 @@ onUnmounted(() => {
               <span>Genre</span>
               <strong>{{ formatList(selectedTranscript.fields?.genres) }}</strong>
             </div>
-            <div>
-              <span>Raw</span>
-              <strong>{{ selectedItem.raw_content_path ? "Saved" : "None" }}</strong>
-            </div>
           </div>
 
           <div v-if="selectedTranscript.warnings?.length" class="warning-box">
@@ -2187,7 +2155,12 @@ onUnmounted(() => {
 
           <section v-if="selectedTranscript.fields?.changelog" class="transcript-section">
             <h3>Changelog</h3>
-            <p>{{ selectedTranscript.fields.changelog }}</p>
+            <div
+              v-if="selectedTranscript.fields?.changelog_html"
+              class="rich-html"
+              v-html="selectedTranscript.fields.changelog_html"
+            ></div>
+            <p v-else>{{ selectedTranscript.fields.changelog }}</p>
           </section>
 
           <section v-if="keyValues.length" class="transcript-section">
@@ -2201,7 +2174,7 @@ onUnmounted(() => {
           </section>
 
           <section
-            v-for="section in selectedTranscript.sections"
+            v-for="section in displayTranscriptSections(selectedTranscript)"
             :key="section.heading"
             class="transcript-section"
           >
@@ -2210,10 +2183,6 @@ onUnmounted(() => {
           </section>
 
           <div class="result-actions">
-            <a v-if="selectedItem.raw_content_path" class="open-link" :href="sourceItemRawURL(selectedItem)" target="_blank">
-              <Icon name="file-search" :size="17" />
-              <span>Open raw HTML</span>
-            </a>
             <a v-if="selectedItem.raw_url" class="open-link" :href="selectedItem.raw_url" target="_blank">
               <Icon name="eye" :size="17" />
               <span>Open source</span>

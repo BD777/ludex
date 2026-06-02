@@ -1,6 +1,7 @@
 package f95zone
 
 import (
+	stdhtml "html"
 	"io"
 	"net/url"
 	"regexp"
@@ -198,6 +199,145 @@ func splitSectionHeading(line string) (string, string) {
 	return "", ""
 }
 
+func extractSectionHTML(body *goquery.Selection, headings ...string) string {
+	targets := map[string]bool{}
+	for _, heading := range headings {
+		targets[strings.ToLower(normalizeLabel(heading))] = true
+	}
+
+	started := false
+	pieces := []string{}
+	body.Contents().EachWithBreak(func(_ int, sel *goquery.Selection) bool {
+		if len(sel.Nodes) == 0 {
+			return true
+		}
+		node := sel.Nodes[0]
+		text := cleanText(sel.Text())
+		heading, inline := splitSectionHeading(text)
+		normalizedHeading := strings.ToLower(normalizeLabel(heading))
+		if !started {
+			if heading != "" && targets[normalizedHeading] {
+				started = true
+				if inline != "" {
+					pieces = append(pieces, stdhtml.EscapeString(cleanUnavailable(inline)))
+				}
+			}
+			return true
+		}
+		if len(pieces) == 0 && isLeadingSectionJunk(node) {
+			return true
+		}
+		if heading != "" {
+			return false
+		}
+		pieces = append(pieces, sanitizeHTMLNode(node))
+		return true
+	})
+
+	out := cleanSanitizedHTML(strings.Join(pieces, ""))
+	if strings.Contains(out, stdhtml.EscapeString(unavailableText)) {
+		return ""
+	}
+	return out
+}
+
+func isLeadingSectionJunk(node *html.Node) bool {
+	if node == nil {
+		return true
+	}
+	if node.Type == html.TextNode {
+		return strings.Trim(strings.TrimSpace(node.Data), ":") == ""
+	}
+	if node.Type == html.ElementNode && strings.EqualFold(node.Data, "br") {
+		return true
+	}
+	return false
+}
+
+func sanitizeHTMLNode(node *html.Node) string {
+	if node == nil {
+		return ""
+	}
+	if node.Type == html.TextNode {
+		if strings.TrimSpace(node.Data) == "" {
+			return ""
+		}
+		return stdhtml.EscapeString(node.Data)
+	}
+	if node.Type != html.ElementNode {
+		return sanitizeHTMLChildren(node)
+	}
+
+	tag := strings.ToLower(node.Data)
+	switch tag {
+	case "script", "style", "iframe", "object", "embed", "button", "img", "noscript":
+		return ""
+	case "br":
+		return "<br>"
+	case "b", "strong":
+		return wrapSanitizedHTML("strong", sanitizeHTMLChildren(node))
+	case "i", "em":
+		return wrapSanitizedHTML("em", sanitizeHTMLChildren(node))
+	case "u":
+		return wrapSanitizedHTML("u", sanitizeHTMLChildren(node))
+	case "s", "strike", "del":
+		return wrapSanitizedHTML("s", sanitizeHTMLChildren(node))
+	case "ul", "ol", "li", "blockquote", "code", "pre":
+		return wrapSanitizedHTML(tag, sanitizeHTMLChildren(node))
+	case "p":
+		return wrapSanitizedHTML("p", sanitizeHTMLChildren(node))
+	case "a":
+		body := sanitizeHTMLChildren(node)
+		href := strings.TrimSpace(nodeAttr(node, "href"))
+		if !isSafeHTMLHref(href) {
+			return body
+		}
+		return `<a href="` + stdhtml.EscapeString(href) + `" target="_blank" rel="noreferrer">` + body + `</a>`
+	default:
+		return sanitizeHTMLChildren(node)
+	}
+}
+
+func sanitizeHTMLChildren(node *html.Node) string {
+	if node == nil {
+		return ""
+	}
+	parts := []string{}
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if html := sanitizeHTMLNode(child); html != "" {
+			parts = append(parts, html)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func wrapSanitizedHTML(tag string, body string) string {
+	if strings.TrimSpace(body) == "" {
+		return ""
+	}
+	return "<" + tag + ">" + body + "</" + tag + ">"
+}
+
+func isSafeHTMLHref(value string) bool {
+	if value == "" {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	if parsed.IsAbs() {
+		return parsed.Scheme == "http" || parsed.Scheme == "https"
+	}
+	return strings.HasPrefix(value, "/")
+}
+
+func cleanSanitizedHTML(value string) string {
+	value = strings.ReplaceAll(value, stdhtml.EscapeString(unavailableText), "")
+	value = strings.ReplaceAll(value, "Log in or register now.", "")
+	return strings.TrimSpace(value)
+}
+
 func extractImages(doc *goquery.Document, body *goquery.Selection) []string {
 	seen := map[string]bool{}
 	images := []string{}
@@ -267,8 +407,10 @@ func extractFields(title string, prefixes []string, keyValues map[string][]strin
 	description := cleanUnavailable(firstSection(sections, "Overview", "Story", "Description"))
 	rawChangelog := firstSection(sections, "Changelog", "Change Log")
 	changelog := ""
+	changelogHTML := ""
 	if !strings.Contains(rawChangelog, unavailableText) {
 		changelog = cleanUnavailable(rawChangelog)
+		changelogHTML = extractSectionHTML(body, "Changelog", "Change Log")
 	}
 
 	fields := domain.TranscriptFields{
@@ -285,6 +427,7 @@ func extractFields(title string, prefixes []string, keyValues map[string][]strin
 		Languages:        uniqueStrings(append(splitList(firstKeyValue(keyValues, "Language")), splitList(firstKeyValue(keyValues, "Languages"))...)),
 		Genres:           splitList(firstKeyValue(keyValues, "Genre", "Genres")),
 		Changelog:        changelog,
+		ChangelogHTML:    changelogHTML,
 		DownloadGroups:   extractDownloadGroups(body, lines),
 	}
 	if fields.Version == "" {

@@ -918,6 +918,38 @@ textarea:focus {
   white-space: pre-wrap;
 }
 
+.rich-html {
+  color: #26352f;
+  line-height: 1.52;
+  overflow-wrap: anywhere;
+}
+
+.rich-html strong {
+  color: #17201c;
+  font-weight: 800;
+}
+
+.rich-html ul,
+.rich-html ol {
+  margin: 6px 0 8px;
+  padding-left: 22px;
+}
+
+.rich-html li {
+  margin: 2px 0;
+}
+
+.rich-html blockquote {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-left: 3px solid #acc4b5;
+  background: #f4faf6;
+}
+
+.rich-html a {
+  color: #1f6d51;
+}
+
 .link-list {
   display: flex;
   flex-wrap: wrap;

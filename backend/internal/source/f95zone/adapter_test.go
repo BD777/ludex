@@ -113,3 +113,48 @@ func TestParseHTMLExtractsDownloadLinks(t *testing.T) {
 		t.Fatalf("second links = %#v", groups[1].Links)
 	}
 }
+
+func TestParseHTMLExtractsSanitizedChangelogHTML(t *testing.T) {
+	html := `
+	<html>
+		<body>
+			<h1 class="p-title-value">Sample Game [v1.2] [Example Dev]</h1>
+			<article class="message--post">
+				<div class="bbWrapper">
+					<b>Changelog</b>:<br />
+					<div class="bbCodeSpoiler">
+						<button type="button" data-xf-click="toggle">Spoiler</button>
+						<div class="bbCodeSpoiler-content">
+							<div class="bbCodeBlock-content">
+								<b>v1.2</b><br />
+								- Fixed a route<br />
+								<ul><li data-xf-list-type="ul">Added a scene</li></ul>
+								<script>alert("nope")</script>
+							</div>
+						</div>
+					</div>
+					<b>DOWNLOAD</b><br />
+					Win/Linux: <a href="https://example.test/win">HOST</a>
+				</div>
+			</article>
+		</body>
+	</html>`
+
+	transcript, err := ParseHTML("https://f95zone.to/threads/sample-game.123456/", strings.NewReader(html))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(transcript.Fields.ChangelogHTML, "<strong>v1.2</strong><br>") {
+		t.Fatalf("changelog html did not preserve bold line: %q", transcript.Fields.ChangelogHTML)
+	}
+	if !strings.Contains(transcript.Fields.ChangelogHTML, "<ul><li>Added a scene</li></ul>") {
+		t.Fatalf("changelog html did not preserve list: %q", transcript.Fields.ChangelogHTML)
+	}
+	if strings.Contains(transcript.Fields.ChangelogHTML, "button") ||
+		strings.Contains(transcript.Fields.ChangelogHTML, "data-xf") ||
+		strings.Contains(transcript.Fields.ChangelogHTML, "script") ||
+		strings.Contains(transcript.Fields.ChangelogHTML, "DOWNLOAD") {
+		t.Fatalf("changelog html was not sanitized or bounded: %q", transcript.Fields.ChangelogHTML)
+	}
+}

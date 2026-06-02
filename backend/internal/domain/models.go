@@ -157,6 +157,7 @@ type TranscriptFields struct {
 	Languages        []string        `json:"languages"`
 	Genres           []string        `json:"genres"`
 	Changelog        string          `json:"changelog"`
+	ChangelogHTML    string          `json:"changelog_html"`
 	DownloadGroups   []DownloadGroup `json:"download_groups"`
 	Screenshots      []string        `json:"screenshots"`
 }
