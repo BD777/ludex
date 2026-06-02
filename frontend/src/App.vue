@@ -496,6 +496,14 @@ async function loadLibrary() {
     selectedGame.value = null;
     gamePanelMode.value = "detail";
   }
+  if (selectedItem.value) {
+    const refreshedItem = nextItems.find((item) => item.id === selectedItem.value?.id) ?? null;
+    selectedItem.value = refreshedItem;
+    if (!refreshedItem) {
+      matchGameId.value = "";
+      matchEditing.value = false;
+    }
+  }
   if (!selectedItem.value && nextItems.length > 0) {
     selectedItem.value = nextItems[0];
     matchGameId.value = "";
@@ -505,6 +513,7 @@ async function loadLibrary() {
 
 async function loadTasks() {
   const hadActiveTasks = activeTasks.value.length > 0;
+  const selectedTaskWasActive = selectedTask.value ? isTaskActive(selectedTask.value) : false;
   const nextTasks = await api<Task[]>("/api/tasks");
   const nextActiveTasks = nextTasks.filter(isTaskActive);
   tasks.value = nextTasks;
@@ -514,7 +523,7 @@ async function loadTasks() {
   if (!selectedTask.value && nextActiveTasks.length > 0) {
     selectedTask.value = nextActiveTasks[0];
   }
-  if (hadActiveTasks && !nextTasks.some(isTaskActive)) {
+  if ((hadActiveTasks || selectedTaskWasActive) && nextActiveTasks.length === 0) {
     await loadLibrary();
   }
 }
