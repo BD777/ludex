@@ -970,6 +970,15 @@ function hasAdapterAuth(profile: AuthProfile | null | undefined, adapter: BuiltI
   return requiredCookies.some((name) => names.has(name));
 }
 
+function missingAdapterAuthCookies(profile: AuthProfile | null | undefined, adapter: BuiltInAdapter) {
+  const requiredCookies: readonly string[] = adapter.authCookieNames ?? [];
+  if (!profile || requiredCookies.length === 0) {
+    return [];
+  }
+  const names = new Set((profile.cookies ?? []).map((cookie) => cookie.name));
+  return requiredCookies.filter((name) => !names.has(name));
+}
+
 function adapterAuthState(profile: AuthProfile | null | undefined, adapter: BuiltInAdapter) {
   if (!profile) {
     return "missing";
@@ -1356,7 +1365,12 @@ onUnmounted(() => {
                 </div>
                 <div v-if="!hasAdapterAuth(selectedAdapterAuthProfile, selectedAdapter)" class="auth-guide">
                   <strong>Auth profile looks incomplete</strong>
-                  <p>Ludex has basic cookies, but not the login marker this adapter expects. Update the userscript, open F95zone while logged in, then run “Sync F95zone auth to Ludex” from the Tampermonkey menu.</p>
+                  <p>
+                    Ludex can see the account name and basic cookies, but it is still missing
+                    {{ missingAdapterAuthCookies(selectedAdapterAuthProfile, selectedAdapter).join(", ") || "the login cookie" }}.
+                    The saved cookies can identify the page session, but may not unlock login-only download links.
+                  </p>
+                  <p>Update the userscript, open F95zone while logged in, then run “Sync F95zone auth to Ludex” from the Tampermonkey menu. If it is still missing, the login cookie is likely not exposed to Tampermonkey.</p>
                 </div>
               </template>
 
