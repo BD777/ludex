@@ -215,6 +215,7 @@ const matchEditing = ref(false);
 const mediaRetrying = ref(false);
 const retryingMediaURL = ref("");
 let noticeTimer: number | undefined;
+let errorTimer: number | undefined;
 
 const importDraftStorageKey = "gmb.importDraft.v1";
 const lastImportTaskStorageKey = "gmb.lastImportTaskId.v1";
@@ -1198,6 +1199,21 @@ let taskPoll: number | undefined;
 
 watch(importDraft, persistImportDraft, { deep: true });
 
+watch(error, (message) => {
+  if (errorTimer !== undefined) {
+    window.clearTimeout(errorTimer);
+    errorTimer = undefined;
+  }
+  if (!message) {
+    return;
+  }
+  errorTimer = window.setTimeout(() => {
+    if (error.value === message) {
+      error.value = "";
+    }
+  }, 4200);
+});
+
 onMounted(() => {
   restoreImportState();
   void loadAll();
@@ -1215,6 +1231,9 @@ onUnmounted(() => {
   }
   if (noticeTimer !== undefined) {
     window.clearTimeout(noticeTimer);
+  }
+  if (errorTimer !== undefined) {
+    window.clearTimeout(errorTimer);
   }
   window.removeEventListener("keydown", handlePreviewKeydown);
 });
@@ -1778,8 +1797,7 @@ onUnmounted(() => {
                   @click="recentImportSourceItem && retryItemImage(recentImportSourceItem, entry)"
                 >
                   <Icon name="refresh" :size="18" />
-                  <strong>{{ entry.role === "cover" ? "Cover failed" : "Image failed" }}</strong>
-                  <small>{{ retryingMediaURL === entry.original_url ? "Retrying" : "Retry" }}</small>
+                  <span class="compact-placeholder-label">{{ retryingMediaURL === entry.original_url ? "Retrying" : "Retry" }}</span>
                 </button>
               </div>
             </div>

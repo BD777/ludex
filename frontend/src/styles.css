@@ -831,6 +831,17 @@ textarea:focus {
   font-size: 0.74rem;
 }
 
+.compact-placeholder-label {
+  max-width: 100%;
+  overflow: hidden;
+  color: #746458;
+  font-size: 0.76rem;
+  font-weight: 720;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .image-placeholder:hover {
   border-color: #a83b3b;
   color: #6f2c2c;
@@ -890,6 +901,11 @@ textarea:focus {
 
 .image-strip.compact {
   grid-template-columns: repeat(auto-fill, minmax(74px, 1fr));
+}
+
+.image-strip.compact .image-placeholder {
+  gap: 4px;
+  padding: 6px;
 }
 
 .meta-grid {
