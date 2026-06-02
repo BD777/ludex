@@ -37,6 +37,8 @@ logged-in source page HTML into the local service.
 - Direct URL: `http://127.0.0.1:8787/userscripts/ludex.user.js`
 - The script detects the current supported source and posts the page URL and
   HTML to the matching import endpoint.
+- It can also save readable source cookies as local auth profiles. Cookie
+  values are persisted locally but are not returned by the status API.
 
 ## Environment
 

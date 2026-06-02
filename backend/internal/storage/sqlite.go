@@ -124,6 +124,21 @@ CREATE TABLE IF NOT EXISTS sources (
 	updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS auth_profiles (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	adapter_id TEXT NOT NULL,
+	domain TEXT NOT NULL,
+	cookie_header TEXT NOT NULL DEFAULT '',
+	cookie_count INTEGER NOT NULL DEFAULT 0,
+	user_agent TEXT NOT NULL DEFAULT '',
+	source_url TEXT NOT NULL DEFAULT '',
+	imported_at TEXT NOT NULL DEFAULT '',
+	last_used_at TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	UNIQUE(adapter_id, domain)
+);
+
 CREATE TABLE IF NOT EXISTS source_items (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	source_id INTEGER REFERENCES sources(id) ON DELETE SET NULL,
@@ -170,6 +185,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_games_title ON games(title);
+CREATE INDEX IF NOT EXISTS idx_auth_profiles_adapter ON auth_profiles(adapter_id, domain);
 CREATE INDEX IF NOT EXISTS idx_source_items_source ON source_items(source_id);
 CREATE INDEX IF NOT EXISTS idx_source_items_match ON source_items(matched_game_id);
 CREATE INDEX IF NOT EXISTS idx_media_assets_game ON media_assets(game_id);
@@ -391,6 +407,81 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		return domain.Source{}, err
 	}
 	return s.GetSource(ctx, id)
+}
+
+func (s *Store) ListAuthProfiles(ctx context.Context) ([]domain.AuthProfile, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, adapter_id, domain, cookie_header, cookie_count, user_agent, source_url, imported_at, last_used_at, created_at, updated_at
+FROM auth_profiles
+ORDER BY updated_at DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	profiles := []domain.AuthProfile{}
+	for rows.Next() {
+		profile, err := scanAuthProfile(rows)
+		if err != nil {
+			return nil, err
+		}
+		profiles = append(profiles, profile)
+	}
+	return profiles, rows.Err()
+}
+
+func (s *Store) GetAuthProfile(ctx context.Context, adapterID string, domainName string) (domain.AuthProfile, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, adapter_id, domain, cookie_header, cookie_count, user_agent, source_url, imported_at, last_used_at, created_at, updated_at
+FROM auth_profiles
+WHERE adapter_id = ? AND domain = ?`, adapterID, domainName)
+	return scanAuthProfile(row)
+}
+
+func (s *Store) UpsertAuthProfile(ctx context.Context, input domain.AuthProfile) (domain.AuthProfile, error) {
+	if input.AdapterID == "" {
+		return domain.AuthProfile{}, errors.New("adapter_id is required")
+	}
+	if input.Domain == "" {
+		return domain.AuthProfile{}, errors.New("domain is required")
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	importedAt := input.ImportedAt
+	if importedAt == "" {
+		importedAt = now
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO auth_profiles (adapter_id, domain, cookie_header, cookie_count, user_agent, source_url, imported_at, last_used_at, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+ON CONFLICT(adapter_id, domain) DO UPDATE SET
+	cookie_header = excluded.cookie_header,
+	cookie_count = excluded.cookie_count,
+	user_agent = excluded.user_agent,
+	source_url = excluded.source_url,
+	imported_at = excluded.imported_at,
+	updated_at = excluded.updated_at`,
+		input.AdapterID,
+		input.Domain,
+		input.CookieHeader,
+		input.CookieCount,
+		input.UserAgent,
+		input.SourceURL,
+		importedAt,
+		now,
+		now,
+	)
+	if err != nil {
+		return domain.AuthProfile{}, err
+	}
+	return s.GetAuthProfile(ctx, input.AdapterID, input.Domain)
+}
+
+func (s *Store) TouchAuthProfileUsed(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE auth_profiles
+SET last_used_at = ?, updated_at = ?
+WHERE id = ?`, time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339), id)
+	return err
 }
 
 func (s *Store) ListSourceItems(ctx context.Context) ([]domain.SourceItem, error) {
@@ -938,6 +1029,26 @@ func scanSource(row scanner) (domain.Source, error) {
 	}
 	source.Enabled = enabled != 0
 	return source, nil
+}
+
+func scanAuthProfile(row scanner) (domain.AuthProfile, error) {
+	var profile domain.AuthProfile
+	if err := row.Scan(
+		&profile.ID,
+		&profile.AdapterID,
+		&profile.Domain,
+		&profile.CookieHeader,
+		&profile.CookieCount,
+		&profile.UserAgent,
+		&profile.SourceURL,
+		&profile.ImportedAt,
+		&profile.LastUsedAt,
+		&profile.CreatedAt,
+		&profile.UpdatedAt,
+	); err != nil {
+		return domain.AuthProfile{}, err
+	}
+	return profile, nil
 }
 
 func scanSourceItem(row scanner) (domain.SourceItem, error) {

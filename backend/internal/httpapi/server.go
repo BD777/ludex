@@ -70,6 +70,8 @@ func New(store *storage.Store) http.Handler {
 	r.Get("/api/sources", server.listSources)
 	r.Post("/api/sources", server.createSource)
 	r.Post("/api/sources/{sourceID}/fetch", server.fetchSource)
+	r.Get("/api/auth-profiles", server.listAuthProfiles)
+	r.Post("/api/auth-profiles/import", server.importAuthProfile)
 
 	r.Get("/api/source-items", server.listSourceItems)
 	r.Get("/api/source-items/{itemID}/raw", server.serveSourceItemRaw)
@@ -222,6 +224,51 @@ func (s *Server) createSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, source)
+}
+
+func (s *Server) listAuthProfiles(w http.ResponseWriter, r *http.Request) {
+	profiles, err := s.store.ListAuthProfiles(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, profiles)
+}
+
+func (s *Server) importAuthProfile(w http.ResponseWriter, r *http.Request) {
+	var input importAuthProfileRequest
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, err)
+		return
+	}
+	adapterID := strings.TrimSpace(input.AdapterID)
+	domainName := normalizeAuthDomain(input.Domain)
+	cookieHeader := normalizeCookieHeader(input.CookieHeader)
+	if adapterID == "" {
+		writeError(w, errors.New("adapter_id is required"))
+		return
+	}
+	if domainName == "" {
+		writeError(w, errors.New("domain is required"))
+		return
+	}
+	if cookieHeader == "" {
+		writeError(w, errors.New("cookie_header is required"))
+		return
+	}
+	profile, err := s.store.UpsertAuthProfile(r.Context(), domain.AuthProfile{
+		AdapterID:    adapterID,
+		Domain:       domainName,
+		CookieHeader: cookieHeader,
+		CookieCount:  countCookies(cookieHeader),
+		UserAgent:    strings.TrimSpace(input.UserAgent),
+		SourceURL:    strings.TrimSpace(input.SourceURL),
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
 }
 
 func (s *Server) fetchSource(w http.ResponseWriter, r *http.Request) {
@@ -393,6 +440,10 @@ func (s *Server) executeF95zoneImport(ctx context.Context, req importF95zoneRequ
 			req.ProxyURL = source.ProxyURL
 		}
 	}
+	authProfile, err := s.authProfileForURL(ctx, "f95zone", req.URL)
+	if err != nil {
+		return importF95zoneResult{}, err
+	}
 
 	rawHTML := []byte(req.HTML)
 	if len(rawHTML) == 0 {
@@ -400,7 +451,7 @@ func (s *Server) executeF95zoneImport(ctx context.Context, req importF95zoneRequ
 			return importF95zoneResult{}, errors.New("url or html is required")
 		}
 		report(1, 0, "Fetching thread HTML")
-		body, err := fetchURL(ctx, req.URL, req.ProxyURL)
+		body, err := fetchURL(ctx, req.URL, req.ProxyURL, authProfile)
 		if err != nil {
 			return importF95zoneResult{}, err
 		}
@@ -445,7 +496,7 @@ func (s *Server) executeF95zoneImport(ctx context.Context, req importF95zoneRequ
 	if replaced {
 		report(4, total, "Updating existing source item")
 	}
-	transcript = s.cacheTranscriptMedia(ctx, transcript, item.ID, req.ProxyURL, report, 5, total)
+	transcript = s.cacheTranscriptMedia(ctx, transcript, item.ID, req.ProxyURL, authProfile, report, 5, total)
 	parsed, err = structToMap(transcript)
 	if err != nil {
 		return importF95zoneResult{}, err
@@ -620,8 +671,13 @@ func (s *Server) runF95zoneRetryMediaTask(taskID int64, itemID int64, proxyURL s
 		}
 		proxyURL = source.ProxyURL
 	}
+	authProfile, err := s.authProfileForURL(ctx, "f95zone", item.RawURL)
+	if err != nil {
+		_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
+		return
+	}
 	if strings.TrimSpace(originalURL) != "" {
-		s.runF95zoneSingleMediaRetryTask(ctx, taskID, item, proxyURL, originalURL, report)
+		s.runF95zoneSingleMediaRetryTask(ctx, taskID, item, proxyURL, authProfile, originalURL, report)
 		return
 	}
 	rawPath, err := s.safeDataPath(item.RawContentPath)
@@ -641,7 +697,7 @@ func (s *Server) runF95zoneRetryMediaTask(taskID int64, itemID int64, proxyURL s
 		return
 	}
 	total := 3 + minInt(len(transcript.Images), maxCachedImages)
-	transcript = s.cacheTranscriptMedia(ctx, transcript, item.ID, proxyURL, report, 2, total)
+	transcript = s.cacheTranscriptMedia(ctx, transcript, item.ID, proxyURL, authProfile, report, 2, total)
 	parsed, err := structToMap(transcript)
 	if err != nil {
 		_, _ = s.store.FailTask(ctx, taskID, "Retry failed", err)
@@ -667,7 +723,7 @@ func (s *Server) runF95zoneRetryMediaTask(taskID int64, itemID int64, proxyURL s
 	_, _ = s.store.FinishTask(ctx, taskID, "Retry complete", result)
 }
 
-func (s *Server) runF95zoneSingleMediaRetryTask(ctx context.Context, taskID int64, item domain.SourceItem, proxyURL string, originalURL string, report progressReporter) {
+func (s *Server) runF95zoneSingleMediaRetryTask(ctx context.Context, taskID int64, item domain.SourceItem, proxyURL string, authProfile *domain.AuthProfile, originalURL string, report progressReporter) {
 	report(1, 4, "Loading media state")
 	transcript, err := transcriptFromMap(item.ParsedJSON)
 	if err != nil {
@@ -694,7 +750,7 @@ func (s *Server) runF95zoneSingleMediaRetryTask(ctx context.Context, taskID int6
 		asset = cached
 	} else {
 		report(2, 4, "Downloading image")
-		asset, err = s.cacheMediaAsset(ctx, resolvedURL, &sourceItemRef, proxyURL)
+		asset, err = s.cacheMediaAsset(ctx, resolvedURL, &sourceItemRef, proxyURL, authProfile)
 		if err != nil {
 			transcript.MediaItems[targetIndex] = failedMediaItem(target.Position, firstNonEmpty(target.Role, mediaRole(target.Position)), resolvedURL, err)
 			transcript = rebuildTranscriptMediaState(transcript)
@@ -858,7 +914,7 @@ func (s *Server) saveRawContent(sourceType string, rawURL string, content []byte
 	return abs, nil
 }
 
-func (s *Server) cacheTranscriptMedia(ctx context.Context, transcript domain.Transcript, sourceItemID int64, proxyURL string, report progressReporter, startProgress int, totalProgress int) domain.Transcript {
+func (s *Server) cacheTranscriptMedia(ctx context.Context, transcript domain.Transcript, sourceItemID int64, proxyURL string, authProfile *domain.AuthProfile, report progressReporter, startProgress int, totalProgress int) domain.Transcript {
 	if len(transcript.Images) == 0 {
 		return transcript
 	}
@@ -908,7 +964,7 @@ func (s *Server) cacheTranscriptMedia(ctx context.Context, transcript domain.Tra
 			})
 			continue
 		}
-		asset, err := s.cacheMediaAsset(ctx, resolvedURL, &sourceItemRef, proxyURL)
+		asset, err := s.cacheMediaAsset(ctx, resolvedURL, &sourceItemRef, proxyURL, authProfile)
 		if err != nil {
 			transcript.MediaItems = append(transcript.MediaItems, failedMediaItem(index, role, resolvedURL, err))
 			continue
@@ -1030,8 +1086,8 @@ func (s *Server) findCachedMediaAsset(ctx context.Context, sourceItemID int64, o
 	return domain.MediaAsset{}, false
 }
 
-func (s *Server) cacheMediaAsset(ctx context.Context, rawURL string, sourceItemID *int64, proxyURL string) (domain.MediaAsset, error) {
-	body, contentType, err := fetchBytes(ctx, rawURL, proxyURL, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", maxMediaBytes)
+func (s *Server) cacheMediaAsset(ctx context.Context, rawURL string, sourceItemID *int64, proxyURL string, authProfile *domain.AuthProfile) (domain.MediaAsset, error) {
+	body, contentType, err := fetchBytes(ctx, rawURL, proxyURL, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", maxMediaBytes, authProfile)
 	if err != nil {
 		return domain.MediaAsset{}, err
 	}
@@ -1122,12 +1178,20 @@ type retryMediaRequest struct {
 	OriginalURL string `json:"original_url"`
 }
 
-func fetchURL(ctx context.Context, rawURL string, proxyURL string) ([]byte, error) {
-	body, _, err := fetchBytes(ctx, rawURL, proxyURL, "text/html,application/xhtml+xml", maxHTMLBytes)
+type importAuthProfileRequest struct {
+	AdapterID    string `json:"adapter_id"`
+	Domain       string `json:"domain"`
+	CookieHeader string `json:"cookie_header"`
+	UserAgent    string `json:"user_agent"`
+	SourceURL    string `json:"source_url"`
+}
+
+func fetchURL(ctx context.Context, rawURL string, proxyURL string, authProfile *domain.AuthProfile) ([]byte, error) {
+	body, _, err := fetchBytes(ctx, rawURL, proxyURL, "text/html,application/xhtml+xml", maxHTMLBytes, authProfile)
 	return body, err
 }
 
-func fetchBytes(ctx context.Context, rawURL string, proxyURL string, accept string, maxBytes int64) ([]byte, string, error) {
+func fetchBytes(ctx context.Context, rawURL string, proxyURL string, accept string, maxBytes int64, authProfile *domain.AuthProfile) ([]byte, string, error) {
 	transport := &http.Transport{}
 	if proxyURL != "" {
 		parsedProxy, err := url.Parse(proxyURL)
@@ -1161,8 +1225,15 @@ func fetchBytes(ctx context.Context, rawURL string, proxyURL string, accept stri
 	if err != nil {
 		return nil, "", err
 	}
-	req.Header.Set("User-Agent", "Ludex/0.1 (+local)")
+	userAgent := "Ludex/0.1 (+local)"
+	if authProfile != nil && strings.TrimSpace(authProfile.UserAgent) != "" {
+		userAgent = strings.TrimSpace(authProfile.UserAgent)
+	}
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", accept)
+	if authProfile != nil && strings.TrimSpace(authProfile.CookieHeader) != "" {
+		req.Header.Set("Cookie", normalizeCookieHeader(authProfile.CookieHeader))
+	}
 	if referer := refererForURL(rawURL); referer != "" {
 		req.Header.Set("Referer", referer)
 	}
@@ -1284,6 +1355,58 @@ func retryMediaTaskTitle(item domain.SourceItem, originalURL string) string {
 		return "Retry image: " + title
 	}
 	return "Retry images: " + title
+}
+
+func (s *Server) authProfileForURL(ctx context.Context, adapterID string, rawURL string) (*domain.AuthProfile, error) {
+	domainName := authDomainFromURL(rawURL)
+	if adapterID == "" || domainName == "" {
+		return nil, nil
+	}
+	profile, err := s.store.GetAuthProfile(ctx, adapterID, domainName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(profile.CookieHeader) == "" {
+		return nil, nil
+	}
+	_ = s.store.TouchAuthProfileUsed(ctx, profile.ID)
+	return &profile, nil
+}
+
+func authDomainFromURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return normalizeAuthDomain(parsed.Hostname())
+}
+
+func normalizeAuthDomain(value string) string {
+	domainName := strings.ToLower(strings.TrimSpace(value))
+	domainName = strings.TrimPrefix(domainName, ".")
+	domainName = strings.TrimPrefix(domainName, "www.")
+	return domainName
+}
+
+func normalizeCookieHeader(value string) string {
+	cookie := strings.TrimSpace(value)
+	if strings.HasPrefix(strings.ToLower(cookie), "cookie:") {
+		cookie = strings.TrimSpace(cookie[len("cookie:"):])
+	}
+	return cookie
+}
+
+func countCookies(cookieHeader string) int {
+	count := 0
+	for _, part := range strings.Split(cookieHeader, ";") {
+		if strings.Contains(strings.TrimSpace(part), "=") {
+			count++
+		}
+	}
+	return count
 }
 
 func minInt(a int, b int) int {

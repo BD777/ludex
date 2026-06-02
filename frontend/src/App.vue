@@ -26,6 +26,19 @@ type Source = {
   updated_at: string;
 };
 
+type AuthProfile = {
+  id: number;
+  adapter_id: string;
+  domain: string;
+  cookie_count: number;
+  user_agent: string;
+  source_url: string;
+  imported_at: string;
+  last_used_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
 type SourceItem = {
   id: number;
   source_id?: number;
@@ -168,6 +181,7 @@ const query = ref("");
 
 const games = ref<Game[]>([]);
 const sources = ref<Source[]>([]);
+const authProfiles = ref<AuthProfile[]>([]);
 const sourceItems = ref<SourceItem[]>([]);
 const tasks = ref<Task[]>([]);
 const selectedGame = ref<Game | null>(null);
@@ -223,7 +237,9 @@ const builtInAdapters = [
     input: "Thread URL / raw HTML",
     dedupe: "Thread ID",
     endpoint: "/api/import/f95zone",
-    attachments: "Cached images"
+    attachments: "Cached images",
+    authDomain: "f95zone.to",
+    withoutBridge: "Download links, login-only spoilers/changelog, and some developer/social links may be unavailable."
   }
 ] as const;
 
@@ -275,6 +291,14 @@ const recentImportImages = computed(() => {
 
 const selectedAdapter = computed(() => {
   return builtInAdapters.find((adapter) => adapter.id === selectedAdapterId.value) ?? builtInAdapters[0];
+});
+
+const selectedAdapterAuthProfile = computed(() => {
+  return (
+    authProfiles.value.find(
+      (profile) => profile.adapter_id === selectedAdapter.value.id && profile.domain === selectedAdapter.value.authDomain
+    ) ?? null
+  );
 });
 
 const selectedTaskSourceItems = computed(() => {
@@ -368,13 +392,15 @@ async function loadAll() {
 }
 
 async function loadLibrary() {
-  const [nextGames, nextSources, nextItems] = await Promise.all([
+  const [nextGames, nextSources, nextAuthProfiles, nextItems] = await Promise.all([
     api<Game[]>("/api/games"),
     api<Source[]>("/api/sources"),
+    api<AuthProfile[]>("/api/auth-profiles"),
     api<SourceItem[]>("/api/source-items")
   ]);
   games.value = nextGames;
   sources.value = nextSources;
+  authProfiles.value = nextAuthProfiles;
   sourceItems.value = nextItems;
   if (!selectedGame.value && nextGames.length > 0) {
     editGame(nextGames[0]);
@@ -859,6 +885,17 @@ function formatBoolean(value?: boolean | null) {
   return value ? "Yes" : "No";
 }
 
+function formatTimestamp(value?: string, fallback = "Never") {
+  if (!value) {
+    return fallback;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString();
+}
+
 function clearImportState() {
   Object.assign(importDraft, importDraftDefaults);
   localStorage.removeItem(importDraftStorageKey);
@@ -1130,6 +1167,24 @@ onUnmounted(() => {
                 <span>Userscript</span>
                 <strong>{{ browserBridge.userscript }}</strong>
               </div>
+              <div>
+                <span>{{ selectedAdapter.name }} cookies</span>
+                <strong>
+                  {{ selectedAdapterAuthProfile ? `${selectedAdapterAuthProfile.cookie_count} saved` : "Not imported" }}
+                </strong>
+              </div>
+              <div>
+                <span>Imported</span>
+                <strong>{{ formatTimestamp(selectedAdapterAuthProfile?.imported_at, "Not imported") }}</strong>
+              </div>
+              <div>
+                <span>Last used</span>
+                <strong>{{ formatTimestamp(selectedAdapterAuthProfile?.last_used_at) }}</strong>
+              </div>
+              <div>
+                <span>User-Agent</span>
+                <strong>{{ selectedAdapterAuthProfile?.user_agent ? "Saved" : "Not saved" }}</strong>
+              </div>
             </dl>
           </div>
 
@@ -1158,6 +1213,10 @@ onUnmounted(() => {
               <div>
                 <span>Endpoint</span>
                 <strong>{{ selectedAdapter.endpoint }}</strong>
+              </div>
+              <div class="wide">
+                <span>Without Browser Bridge</span>
+                <strong>{{ selectedAdapter.withoutBridge }}</strong>
               </div>
             </dl>
           </div>

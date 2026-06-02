@@ -9,6 +9,8 @@
 // @match        https://f95zone.to/threads/*
 // @match        https://f95zone.to/threads/*/
 // @grant        GM_xmlhttpRequest
+// @grant        GM_cookie
+// @grant        GM_registerMenuCommand
 // @connect      127.0.0.1
 // @connect      localhost
 // ==/UserScript==
@@ -17,13 +19,14 @@
   "use strict";
 
   const LUDEX_BASE_URL = "http://127.0.0.1:8787";
-  const BUTTON_ID = "ludex-browser-bridge";
+  const WRAPPER_ID = "ludex-browser-bridge";
   const STYLE_ID = "ludex-browser-bridge-style";
 
   const ADAPTERS = [
     {
       id: "f95zone",
       name: "F95zone",
+      domain: "f95zone.to",
       endpoint: "/api/import/f95zone",
       matches(location) {
         return location.hostname === "f95zone.to" && location.pathname.startsWith("/threads/");
@@ -49,16 +52,24 @@
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-      #${BUTTON_ID} {
+      #${WRAPPER_ID} {
         position: fixed;
         right: 18px;
         bottom: 18px;
         z-index: 2147483647;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 8px;
+        max-width: min(360px, calc(100vw - 36px));
+      }
+
+      #${WRAPPER_ID} button {
         display: inline-flex;
         align-items: center;
         gap: 8px;
         min-height: 38px;
-        max-width: min(360px, calc(100vw - 36px));
+        max-width: 100%;
         padding: 0 13px;
         overflow: hidden;
         border: 0;
@@ -72,16 +83,26 @@
         cursor: pointer;
       }
 
-      #${BUTTON_ID}:hover {
+      #${WRAPPER_ID} button:hover {
         background: #265f4a;
       }
 
-      #${BUTTON_ID}[disabled] {
+      #${WRAPPER_ID} button[disabled] {
         cursor: default;
         opacity: 0.72;
       }
 
-      #${BUTTON_ID}.ludex-error {
+      #${WRAPPER_ID} button.ludex-secondary {
+        color: #243d35;
+        background: #f3efe6;
+      }
+
+      #${WRAPPER_ID} button.ludex-secondary:hover {
+        background: #e8e1d4;
+      }
+
+      #${WRAPPER_ID} button.ludex-error {
+        color: #ffffff;
         background: #a83b3b;
       }
     `;
@@ -101,8 +122,8 @@
     return doctype + "\n" + document.documentElement.outerHTML;
   }
 
-  function postToLudex(adapter, payload) {
-    const url = `${LUDEX_BASE_URL}${adapter.endpoint}`;
+  function postJSON(path, payload) {
+    const url = `${LUDEX_BASE_URL}${path}`;
     const body = JSON.stringify(payload);
 
     if (typeof GM_xmlhttpRequest === "function") {
@@ -146,6 +167,77 @@
     });
   }
 
+  function postToLudex(adapter, payload) {
+    return postJSON(adapter.endpoint, payload);
+  }
+
+  function readableDocumentCookie() {
+    return (document.cookie || "").trim();
+  }
+
+  function cookieHeaderFromGM(adapter) {
+    if (typeof GM_cookie === "undefined" || typeof GM_cookie.list !== "function") {
+      return Promise.resolve("");
+    }
+    return new Promise((resolve) => {
+      try {
+        GM_cookie.list({ url: window.location.href }, (cookies, error) => {
+          if (error || !Array.isArray(cookies)) {
+            resolve("");
+            return;
+          }
+          resolve(
+            cookies
+              .filter((cookie) => cookie && cookie.name && typeof cookie.value === "string")
+              .map((cookie) => `${cookie.name}=${cookie.value}`)
+              .join("; ")
+          );
+        });
+      } catch (err) {
+        resolve("");
+      }
+    });
+  }
+
+  async function cookieHeaderForAdapter(adapter) {
+    const fromGM = await cookieHeaderFromGM(adapter);
+    if (fromGM) {
+      return fromGM;
+    }
+    return readableDocumentCookie();
+  }
+
+  async function importCookies(adapter, button) {
+    if (button) {
+      setButtonState(button, "Saving cookies...", "busy");
+    }
+    try {
+      const cookieHeader = await cookieHeaderForAdapter(adapter);
+      if (!cookieHeader) {
+        throw new Error("No readable cookies found");
+      }
+      const result = await postJSON("/api/auth-profiles/import", {
+        adapter_id: adapter.id,
+        domain: adapter.domain,
+        cookie_header: cookieHeader,
+        user_agent: navigator.userAgent,
+        source_url: window.location.href
+      });
+      const count = result && typeof result.cookie_count === "number" ? result.cookie_count : 0;
+      if (button) {
+        setButtonState(button, `Cookies saved (${count})`, "ok");
+        window.setTimeout(() => setButtonState(button, "Cookies", "idle"), 3500);
+      }
+    } catch (err) {
+      if (button) {
+        setButtonState(button, err && err.message ? err.message : "Cookie import failed", "error");
+        window.setTimeout(() => setButtonState(button, "Cookies", "idle"), 6000);
+      } else {
+        window.alert(err && err.message ? err.message : "Cookie import failed");
+      }
+    }
+  }
+
   async function importCurrentPage(adapter, button) {
     setButtonState(button, `Sending ${adapter.name} to Ludex...`, "busy");
     try {
@@ -160,19 +252,38 @@
   }
 
   function mountButton(adapter) {
-    if (document.getElementById(BUTTON_ID)) {
+    if (document.getElementById(WRAPPER_ID)) {
       return;
     }
     installStyle();
-    const button = document.createElement("button");
-    button.id = BUTTON_ID;
-    button.type = "button";
-    button.title = `Send the current ${adapter.name} page HTML to local Ludex`;
-    button.textContent = `Import ${adapter.name} to Ludex`;
-    button.addEventListener("click", () => {
-      void importCurrentPage(adapter, button);
+    const wrapper = document.createElement("div");
+    wrapper.id = WRAPPER_ID;
+
+    const importButton = document.createElement("button");
+    importButton.type = "button";
+    importButton.title = `Send the current ${adapter.name} page HTML to local Ludex`;
+    importButton.textContent = `Import ${adapter.name} to Ludex`;
+    importButton.addEventListener("click", () => {
+      void importCurrentPage(adapter, importButton);
     });
-    document.body.appendChild(button);
+
+    const cookieButton = document.createElement("button");
+    cookieButton.type = "button";
+    cookieButton.className = "ludex-secondary";
+    cookieButton.title = `Save readable ${adapter.name} cookies to local Ludex`;
+    cookieButton.textContent = "Cookies";
+    cookieButton.addEventListener("click", () => {
+      void importCookies(adapter, cookieButton);
+    });
+
+    wrapper.append(importButton, cookieButton);
+    document.body.appendChild(wrapper);
+
+    if (typeof GM_registerMenuCommand === "function") {
+      GM_registerMenuCommand(`Import ${adapter.name} cookies to Ludex`, () => {
+        void importCookies(adapter, null);
+      });
+    }
   }
 
   function boot() {

@@ -24,6 +24,20 @@ type Source struct {
 	UpdatedAt  string `json:"updated_at"`
 }
 
+type AuthProfile struct {
+	ID           int64  `json:"id"`
+	AdapterID    string `json:"adapter_id"`
+	Domain       string `json:"domain"`
+	CookieHeader string `json:"-"`
+	CookieCount  int    `json:"cookie_count"`
+	UserAgent    string `json:"user_agent"`
+	SourceURL    string `json:"source_url"`
+	ImportedAt   string `json:"imported_at"`
+	LastUsedAt   string `json:"last_used_at"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
+}
+
 type SourceItem struct {
 	ID             int64          `json:"id"`
 	SourceID       *int64         `json:"source_id,omitempty"`
