@@ -1,16 +1,18 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	_ "embed"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime"
 	"net"
 	"net/http"
@@ -30,6 +32,9 @@ import (
 
 //go:embed userscripts/ludex.user.js
 var ludexUserscript string
+
+//go:embed extensions/ludex-browser-bridge/*
+var extensionFiles embed.FS
 
 type Server struct {
 	store *storage.Store
@@ -58,6 +63,8 @@ func New(store *storage.Store) http.Handler {
 	r.Head("/userscripts/ludex.user.js", server.serveLudexUserscript)
 	r.Get("/userscripts/f95zone.user.js", server.serveLudexUserscript)
 	r.Head("/userscripts/f95zone.user.js", server.serveLudexUserscript)
+	r.Get("/extensions/ludex-browser-bridge.zip", server.serveBrowserExtensionZip)
+	r.Head("/extensions/ludex-browser-bridge.zip", server.serveBrowserExtensionZip)
 	r.Get("/api/tasks", server.listTasks)
 	r.Get("/api/tasks/{taskID}", server.getTask)
 
@@ -102,6 +109,69 @@ func (s *Server) serveLudexUserscript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `inline; filename="ludex.user.js"`)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_, _ = io.WriteString(w, ludexUserscript)
+}
+
+func (s *Server) serveBrowserExtensionZip(w http.ResponseWriter, r *http.Request) {
+	zipBytes, err := browserExtensionZip()
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Disposition", `attachment; filename="ludex-browser-bridge.zip"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Length", strconv.Itoa(len(zipBytes)))
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write(zipBytes)
+}
+
+func browserExtensionZip() ([]byte, error) {
+	const root = "extensions/ludex-browser-bridge"
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	err := fs.WalkDir(extensionFiles, root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, ok := strings.CutPrefix(path, root+"/")
+		if !ok || rel == "" {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = rel
+		header.Method = zip.Deflate
+		writer, err := zw.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		data, err := extensionFiles.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		_, err = writer.Write(data)
+		return err
+	})
+	if err != nil {
+		_ = zw.Close()
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {

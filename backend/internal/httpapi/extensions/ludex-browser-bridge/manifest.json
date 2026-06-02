@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Ludex Browser Bridge",
+  "version": "0.1.0",
+  "description": "Sync source auth cookies to local Ludex.",
+  "permissions": ["activeTab", "cookies", "scripting"],
+  "host_permissions": [
+    "https://f95zone.to/*",
+    "http://127.0.0.1:8787/*",
+    "http://localhost:8787/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Sync auth to Ludex",
+    "default_popup": "popup.html"
+  }
+}

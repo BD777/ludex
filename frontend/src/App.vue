@@ -236,10 +236,14 @@ const selectedAdapterId = ref("f95zone");
 const browserBridge = {
   name: "Ludex Browser Bridge",
   userscript: "/userscripts/ludex.user.js",
-  mode: "Tampermonkey userscript",
+  extensionPackage: "/extensions/ludex-browser-bridge.zip",
+  mode: "Userscript + Chromium extension",
   coverage: "F95zone now, more adapters later",
-  install: "Install once",
-  action: "Tampermonkey menu sync"
+  install: "Userscript installs from Ludex; extension uses Load unpacked",
+  action: "Sync source auth into Ludex",
+  extension: "Reads HttpOnly cookies via chrome.cookies",
+  extensionSource: "backend/internal/httpapi/extensions/ludex-browser-bridge",
+  limitation: "Chrome/Edge local extensions cannot be one-click installed from a web page"
 };
 
 const builtInAdapters = [
@@ -1225,10 +1229,16 @@ onUnmounted(() => {
         <div class="detail-pane bridge-pane">
           <div class="pane-title">
             <h1>{{ browserBridge.name }}</h1>
-            <a class="primary" :href="browserBridge.userscript" target="_blank" rel="noreferrer">
-              <Icon name="download" :size="17" />
-              <span>Install userscript</span>
-            </a>
+            <div class="button-row">
+              <a class="secondary" :href="browserBridge.userscript" target="_blank" rel="noreferrer">
+                <Icon name="download" :size="17" />
+                <span>Userscript</span>
+              </a>
+              <a class="primary" :href="browserBridge.extensionPackage" target="_blank" rel="noreferrer">
+                <Icon name="download" :size="17" />
+                <span>Extension ZIP</span>
+              </a>
+            </div>
           </div>
           <dl class="meta-grid">
             <div>
@@ -1254,6 +1264,22 @@ onUnmounted(() => {
             <div>
               <span>Userscript</span>
               <strong>{{ browserBridge.userscript }}</strong>
+            </div>
+            <div>
+              <span>Extension</span>
+              <strong>{{ browserBridge.extension }}</strong>
+            </div>
+            <div>
+              <span>Extension package</span>
+              <strong>{{ browserBridge.extensionPackage }}</strong>
+            </div>
+            <div>
+              <span>Load unpacked folder</span>
+              <strong>{{ browserBridge.extensionSource }}</strong>
+            </div>
+            <div class="wide">
+              <span>Install note</span>
+              <strong>{{ browserBridge.limitation }}</strong>
             </div>
             <div class="wide">
               <span>Global status</span>
@@ -1371,6 +1397,7 @@ onUnmounted(() => {
                     The saved cookies can identify the page session, but may not unlock login-only download links.
                   </p>
                   <p>Update the userscript, open F95zone while logged in, then run “Sync F95zone auth to Ludex” from the Tampermonkey menu. If it is still missing, the login cookie is likely not exposed to Tampermonkey.</p>
+                  <p>For HttpOnly cookies such as xf_user, download the Ludex extension ZIP, load it unpacked in Chrome/Edge developer mode, then use the extension popup to sync auth.</p>
                 </div>
               </template>
 
