@@ -94,6 +94,11 @@ func New(store *storage.Store) http.Handler {
 	r.Post("/api/sources/{sourceID}/fetch", server.fetchSource)
 	r.Get("/api/auth-profiles", server.listAuthProfiles)
 	r.Post("/api/auth-profiles/import", server.importAuthProfile)
+	r.Get("/api/telegram/status", server.telegramStatus)
+	r.Post("/api/telegram/auth/send-code", server.telegramSendCode)
+	r.Post("/api/telegram/auth/sign-in", server.telegramSignIn)
+	r.Get("/api/telegram/dialogs", server.telegramDialogs)
+	r.Post("/api/telegram/sources", server.createTelegramSource)
 
 	r.Get("/api/source-items", server.listSourceItems)
 	r.Get("/api/source-items/{itemID}/raw", server.serveSourceItemRaw)
@@ -107,6 +112,7 @@ func New(store *storage.Store) http.Handler {
 	r.Head("/api/media/{mediaID}/content", server.serveMedia)
 
 	r.Post("/api/import/f95zone", server.importF95zone)
+	r.Post("/api/import/telegram", server.importTelegram)
 
 	return r
 }
@@ -223,6 +229,13 @@ func (s *Server) browseAdapter(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, page)
+	case "telegram":
+		page, err := s.browseTelegram(r.Context(), req, adapter.Browse.Capabilities)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, page)
 	default:
 		writeError(w, fmt.Errorf("adapter %q does not support browsing", adapterID))
 	}
@@ -253,7 +266,7 @@ func (s *Server) browseAdapterCover(w http.ResponseWriter, r *http.Request) {
 }
 
 func builtInAdapters() []domain.Adapter {
-	return []domain.Adapter{f95zoneAdapterDescriptor()}
+	return []domain.Adapter{f95zoneAdapterDescriptor(), telegramAdapterDescriptor()}
 }
 
 func builtInAdapter(adapterID string) (domain.Adapter, bool) {
@@ -305,6 +318,36 @@ func f95zoneAdapterDescriptor() domain.Adapter {
 				SearchNote: "F95zone list search is not enabled yet; XenForo search requires a separate adapter flow.",
 				FilterNote: "F95zone browse supports source-provided prefix filters from the current list page.",
 				SortNote:   "F95zone list sorting is not enabled yet.",
+			},
+		},
+	}
+}
+
+func telegramAdapterDescriptor() domain.Adapter {
+	return domain.Adapter{
+		ID:            "telegram",
+		Name:          "Telegram",
+		Kind:          "MTProto account",
+		Status:        "built-in",
+		Input:         "Authorized account and selected group/channel",
+		Dedupe:        "Peer ID",
+		Endpoint:      "/api/telegram/dialogs",
+		Attachments:   "Message media later",
+		AuthDomain:    "telegram.org",
+		WithoutBridge: "Requires a Telegram API ID/hash and phone-code login; message field extraction is configured per group later.",
+		Browse: domain.AdapterBrowseManifest{
+			Enabled:     true,
+			Description: "Browse selected Telegram groups/channels and import individual messages as source items.",
+			Capabilities: domain.AdapterBrowseCapabilities{
+				CustomURL:  false,
+				Pagination: true,
+				Search:     true,
+				Filter:     false,
+				Sort:       false,
+				Import:     true,
+				SearchNote: "Telegram searches inside one selected group or channel.",
+				FilterNote: "Telegram group-specific filters will be added after the target groups are connected.",
+				SortNote:   "Telegram message browsing uses Telegram's default newest-first order.",
 			},
 		},
 	}
@@ -364,6 +407,29 @@ func (s *Server) retryTask(w http.ResponseWriter, r *http.Request) {
 			req.ProxyURL = strings.TrimSpace(retryReq.ProxyURL)
 		}
 		nextTask, duplicate, err := s.enqueueF95zoneImport(r.Context(), req)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if _, err := s.store.MarkTaskRetried(r.Context(), task.ID, nextTask.ID); err != nil {
+			writeError(w, err)
+			return
+		}
+		status := http.StatusAccepted
+		if duplicate {
+			status = http.StatusOK
+		}
+		writeJSON(w, status, map[string]any{
+			"task":      nextTask,
+			"duplicate": duplicate,
+		})
+	case "import:telegram":
+		req, err := importTelegramRequestFromTask(task)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		nextTask, duplicate, err := s.enqueueTelegramImport(r.Context(), req)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1505,13 +1571,16 @@ type retryTaskRequest struct {
 }
 
 type browseAdapterRequest struct {
-	PresetID  string `json:"preset_id"`
-	URL       string `json:"url"`
-	FilterURL string `json:"filter_url"`
-	Page      int    `json:"page"`
-	Search    string `json:"search"`
-	Sort      string `json:"sort"`
-	ProxyURL  string `json:"proxy_url"`
+	PresetID  string  `json:"preset_id"`
+	URL       string  `json:"url"`
+	FilterURL string  `json:"filter_url"`
+	Page      int     `json:"page"`
+	Limit     int     `json:"limit"`
+	OffsetID  int     `json:"offset_id"`
+	SourceIDs []int64 `json:"source_ids"`
+	Search    string  `json:"search"`
+	Sort      string  `json:"sort"`
+	ProxyURL  string  `json:"proxy_url"`
 }
 
 type importAuthProfileRequest struct {

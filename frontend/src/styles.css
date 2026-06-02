@@ -193,6 +193,12 @@ button {
   background: #2f6f57;
 }
 
+.import-mode-button:disabled {
+  color: #8a948d;
+  background: transparent;
+  cursor: not-allowed;
+}
+
 .import-task-panel {
   max-width: 960px;
 }
@@ -1084,6 +1090,51 @@ textarea:focus {
   color: #53635a;
 }
 
+.telegram-auth-pane {
+  gap: 14px;
+}
+
+.telegram-auth-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.telegram-dialog-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.telegram-dialog-list {
+  display: grid;
+  gap: 8px;
+}
+
+.telegram-dialog-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid #e3dfd5;
+  border-radius: 8px;
+  background: #fffdfa;
+}
+
+.telegram-dialog-row .row-main {
+  min-width: 0;
+}
+
+.telegram-dialog-row .row-main strong,
+.telegram-dialog-row .row-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .adapter-browser-pane {
   gap: 14px;
 }
@@ -1096,6 +1147,49 @@ textarea:focus {
 
 .adapter-browser-controls .wide {
   grid-column: 1 / -1;
+}
+
+.telegram-source-picker {
+  display: grid;
+  gap: 10px;
+}
+
+.telegram-source-list {
+  display: grid;
+  gap: 8px;
+}
+
+.telegram-source-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid #e3dfd5;
+  border-radius: 8px;
+  background: #fffdfa;
+}
+
+.telegram-source-option:hover {
+  border-color: #b9cdbf;
+  background: #f8fbf7;
+}
+
+.telegram-source-option input {
+  width: 18px;
+  height: 18px;
+  accent-color: #2f6f57;
+}
+
+.telegram-source-option .row-main {
+  min-width: 0;
+}
+
+.telegram-source-option .row-main strong,
+.telegram-source-option .row-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .form-action-cell {
@@ -1188,6 +1282,11 @@ textarea:focus {
   cursor: zoom-in;
 }
 
+.adapter-result-cover.is-message {
+  color: #385a4d;
+  background: #edf4ef;
+}
+
 .adapter-result-cover.is-loaded:hover,
 .adapter-result-cover.is-loaded:focus-visible {
   border-color: #3f8267;
@@ -1255,6 +1354,17 @@ textarea:focus {
 
 .adapter-result-stats {
   color: #667269;
+}
+
+.adapter-result-summary {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0;
+  color: #4f5d55;
+  font-size: 0.84rem;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .row-actions {
@@ -1673,6 +1783,8 @@ dd {
   .adapters-layout,
   .meta-grid,
   .adapter-browser-controls,
+  .telegram-auth-grid,
+  .telegram-dialog-toolbar,
   .match-bar {
     grid-template-columns: 1fr;
   }

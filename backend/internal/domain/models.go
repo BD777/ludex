@@ -80,6 +80,7 @@ type AdapterListItem struct {
 	PreviewURL string   `json:"preview_url"`
 	CoverImage string   `json:"cover_image"`
 	Author     string   `json:"author"`
+	Summary    string   `json:"summary"`
 	StartedAt  string   `json:"started_at"`
 	LatestAt   string   `json:"latest_at"`
 	LatestBy   string   `json:"latest_by"`

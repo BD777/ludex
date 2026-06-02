@@ -82,6 +82,7 @@ type AdapterListItem = {
   preview_url: string;
   cover_image: string;
   author: string;
+  summary: string;
   started_at: string;
   latest_at: string;
   latest_by: string;
@@ -134,6 +135,42 @@ type AuthCookie = {
   http_only: boolean;
 };
 
+type TelegramStatus = {
+  configured: boolean;
+  authorized: boolean;
+  user_id?: number;
+  username?: string;
+  phone?: string;
+  first_name?: string;
+  last_name?: string;
+  error?: string;
+};
+
+type TelegramDialog = {
+  peer_id: string;
+  type: string;
+  title: string;
+  username?: string;
+  access_hash?: string;
+  participants?: number;
+  date?: string;
+  source_url: string;
+  config_json: string;
+};
+
+type TelegramSendCodeResult = {
+  code_sent: boolean;
+  phone: string;
+  code_type: string;
+  timeout?: number;
+  status: TelegramStatus;
+};
+
+type TelegramSignInResult = {
+  password_required: boolean;
+  status: TelegramStatus;
+};
+
 type SourceItem = {
   id: number;
   source_id?: number;
@@ -165,6 +202,7 @@ type Task = {
     transcript?: Transcript;
     import_request?: {
       source_id?: number;
+      message_id?: number;
       url?: string;
       proxy_url?: string;
       create_game?: boolean;
@@ -342,6 +380,9 @@ const adapterBrowseDraftDefaults = {
   url: "",
   filter_url: "",
   page: 1,
+  limit: 30,
+  offset_id: 0,
+  search: "",
   sort: "",
   proxy_url: ""
 };
@@ -350,6 +391,21 @@ const adapterBrowseDraft = reactive({ ...adapterBrowseDraftDefaults });
 const adapterBrowsePage = ref<AdapterBrowsePage | null>(null);
 const adapterBrowsing = ref(false);
 const adapterCoverStates = reactive<Record<string, CoverLoadState>>({});
+const telegramStatus = ref<TelegramStatus>({ configured: false, authorized: false });
+const telegramDialogs = ref<TelegramDialog[]>([]);
+const telegramLoading = ref(false);
+const telegramCodeSent = ref(false);
+const telegramPasswordRequired = ref(false);
+const telegramSavingSourceURL = ref("");
+const telegramDialogQuery = ref("");
+const selectedTelegramSourceIds = ref<number[]>([]);
+const telegramAuthDraft = reactive({
+  api_id: "",
+  api_hash: "",
+  phone: "",
+  code: "",
+  password: ""
+});
 
 const browserBridge = {
   name: "Ludex Browser Bridge",
@@ -403,6 +459,35 @@ const fallbackAdapters: Adapter[] = [
         search_note: "F95zone list search is not enabled yet; XenForo search requires a separate adapter flow.",
         filter_note: "F95zone browse supports source-provided prefix filters from the current list page.",
         sort_note: "F95zone list sorting is not enabled yet."
+      }
+    }
+  },
+  {
+    id: "telegram",
+    name: "Telegram",
+    kind: "MTProto account",
+    status: "built-in",
+    input: "Authorized account and selected group/channel",
+    dedupe: "Peer ID",
+    endpoint: "/api/telegram/dialogs",
+    attachments: "Message media later",
+    auth_domain: "telegram.org",
+    auth_cookie_names: [],
+    without_bridge: "Requires a Telegram API ID/hash and phone-code login; message field extraction is configured per group later.",
+    browse: {
+      enabled: true,
+      description: "Browse selected Telegram groups/channels and import individual messages as source items.",
+      presets: [],
+      capabilities: {
+        custom_url: false,
+        pagination: true,
+        search: true,
+        filter: false,
+        sort: false,
+        import: true,
+        search_note: "Telegram searches inside one selected group or channel.",
+        filter_note: "Telegram group-specific filters will be added after the target groups are connected.",
+        sort_note: "Telegram message browsing uses Telegram's default newest-first order."
       }
     }
   }
@@ -535,6 +620,34 @@ const adapterBrowseLoadingCovers = computed(() => {
   return adapterBrowsePage.value?.items.filter((item) => adapterBrowseCoverStatus(item) === "loading").length ?? 0;
 });
 
+const telegramSources = computed(() => {
+  return sources.value.filter((source) => source.type === "telegram");
+});
+
+const selectedTelegramSources = computed(() => {
+  const selected = new Set(selectedTelegramSourceIds.value);
+  return telegramSources.value.filter((source) => selected.has(source.id));
+});
+
+const telegramSearchDisabled = computed(() => selectedTelegramSourceIds.value.length !== 1);
+
+const canLoadTelegramMessages = computed(() => {
+  return selectedAdapter.value.id === "telegram" && selectedTelegramSourceIds.value.length > 0 && !adapterBrowsing.value;
+});
+
+const telegramOlderOffsetID = computed(() => {
+  if (selectedAdapter.value.id !== "telegram" || !adapterBrowsePage.value?.next_url) {
+    return 0;
+  }
+  try {
+    const parsed = new URL(adapterBrowsePage.value.next_url);
+    return Number(parsed.searchParams.get("offset_id") ?? "0");
+  } catch {
+    const match = /offset_id=(\d+)/.exec(adapterBrowsePage.value.next_url);
+    return match ? Number(match[1]) : 0;
+  }
+});
+
 const syncedAuthProfiles = computed(() => {
   return authProfiles.value.filter((profile) => profile.cookie_count > 0);
 });
@@ -546,6 +659,52 @@ const globalAuthSummary = computed(() => {
   return syncedAuthProfiles.value
     .map((profile) => `${adapterName(profile.adapter_id)}${profile.username ? ` as ${profile.username}` : ""}`)
     .join(", ");
+});
+
+const telegramAuthLabel = computed(() => {
+  if (telegramStatus.value.authorized) {
+    return "authorized";
+  }
+  if (telegramStatus.value.configured) {
+    return "configured";
+  }
+  return "missing";
+});
+
+const telegramAuthClass = computed(() => {
+  if (telegramStatus.value.authorized) return "succeeded";
+  if (telegramStatus.value.configured) return "warning";
+  return "failed";
+});
+
+const telegramAccountName = computed(() => {
+  const status = telegramStatus.value;
+  if (status.username) return `@${status.username}`;
+  const fullName = [status.first_name, status.last_name].filter(Boolean).join(" ");
+  return fullName || "Not signed in";
+});
+
+const canSubmitTelegramSignIn = computed(() => {
+  return (
+    telegramCodeSent.value ||
+    telegramPasswordRequired.value ||
+    telegramAuthDraft.code.trim().length > 0 ||
+    telegramAuthDraft.password.trim().length > 0
+  );
+});
+
+const filteredTelegramDialogs = computed(() => {
+  const needle = telegramDialogQuery.value.trim().toLowerCase();
+  if (!needle) {
+    return telegramDialogs.value;
+  }
+  return telegramDialogs.value.filter((dialog) => {
+    return (
+      dialog.title.toLowerCase().includes(needle) ||
+      dialog.type.toLowerCase().includes(needle) ||
+      (dialog.username ?? "").toLowerCase().includes(needle)
+    );
+  });
 });
 
 const selectedTaskSourceItems = computed(() => {
@@ -839,9 +998,22 @@ async function retryTask(task: Task) {
   }
 }
 
-async function browseAdapterList() {
+async function browseAdapterList(resetOffset = false) {
   if (!selectedAdapter.value.browse.enabled) {
     return;
+  }
+  if (selectedAdapter.value.id === "telegram") {
+    if (selectedTelegramSourceIds.value.length === 0) {
+      error.value = "Choose at least one Telegram group";
+      return;
+    }
+    if (adapterBrowseDraft.search.trim() && selectedTelegramSourceIds.value.length !== 1) {
+      error.value = "Telegram source search supports one group at a time";
+      return;
+    }
+    if (resetOffset) {
+      adapterBrowseDraft.offset_id = 0;
+    }
   }
   error.value = "";
   clearNotice();
@@ -854,6 +1026,10 @@ async function browseAdapterList() {
         url: adapterBrowseDraft.url.trim(),
         filter_url: adapterBrowseDraft.filter_url.trim(),
         page: adapterBrowseDraft.page,
+        limit: adapterBrowseDraft.limit,
+        offset_id: adapterBrowseDraft.offset_id,
+        source_ids: selectedAdapter.value.id === "telegram" ? selectedTelegramSourceIds.value : [],
+        search: adapterBrowseDraft.search.trim(),
         sort: adapterBrowseDraft.sort,
         proxy_url: adapterBrowseDraft.proxy_url.trim() || importDraft.proxy_url.trim()
       })
@@ -862,7 +1038,7 @@ async function browseAdapterList() {
     prepareAdapterCoverStates(page);
     adapterBrowseDraft.page = page.page || adapterBrowseDraft.page || 1;
     adapterBrowseDraft.url = page.url;
-    showNotice("Adapter list loaded");
+    showNotice(selectedAdapter.value.id === "telegram" ? "Telegram messages loaded" : "Adapter list loaded");
   } catch (err) {
     error.value = toMessage(err);
   } finally {
@@ -875,6 +1051,7 @@ function selectBrowsePreset(presetID: string) {
   adapterBrowseDraft.url = "";
   adapterBrowseDraft.filter_url = "";
   adapterBrowseDraft.page = 1;
+  adapterBrowseDraft.offset_id = 0;
   adapterBrowsePage.value = null;
 }
 
@@ -884,9 +1061,37 @@ function resetAdapterBrowse() {
   adapterBrowseDraft.url = "";
   adapterBrowseDraft.filter_url = "";
   adapterBrowseDraft.page = 1;
+  adapterBrowseDraft.offset_id = 0;
+  adapterBrowseDraft.search = "";
   adapterBrowseDraft.sort = "";
   adapterBrowseDraft.proxy_url = "";
   adapterBrowsePage.value = null;
+}
+
+function resetImportFormsForAdapter() {
+  Object.assign(importDraft, importDraftDefaults);
+  resetAdapterBrowse();
+  selectedTelegramSourceIds.value = [];
+}
+
+function changeImportAdapter(event: Event) {
+  const target = event.target;
+  if (!(target instanceof HTMLSelectElement)) {
+    return;
+  }
+  selectedAdapterId.value = target.value;
+  resetImportFormsForAdapter();
+  if (selectedAdapter.value.id === "telegram") {
+    importMode.value = "browse";
+    void loadTelegramStatus();
+  }
+}
+
+function setImportMode(nextMode: ImportMode) {
+  if (nextMode === "direct" && selectedAdapter.value.id !== "f95zone") {
+    return;
+  }
+  importMode.value = nextMode;
 }
 
 function selectBrowseFilter(filterURL: string) {
@@ -906,6 +1111,12 @@ function selectBrowseFilterFromEvent(event: Event) {
 }
 
 async function goBrowsePage(direction: 1 | -1) {
+  if (selectedAdapter.value.id === "telegram") {
+    if (direction > 0) {
+      await loadOlderTelegramMessages();
+    }
+    return;
+  }
   const targetURL = direction > 0 ? adapterBrowsePage.value?.next_url : adapterBrowsePage.value?.prev_url;
   if (!targetURL) {
     return;
@@ -920,8 +1131,186 @@ async function importBrowseItem(item: AdapterListItem) {
   if (!item.importable || !item.url) {
     return;
   }
+  if (item.adapter_id === "telegram") {
+    await queueTelegramImport(item);
+    return;
+  }
   importDraft.url = item.url;
   await queueF95zoneImport(item.url);
+}
+
+async function loadOlderTelegramMessages() {
+  const offsetID = telegramOlderOffsetID.value;
+  if (!offsetID) {
+    return;
+  }
+  adapterBrowseDraft.offset_id = offsetID;
+  await browseAdapterList();
+}
+
+async function queueTelegramImport(item: AdapterListItem) {
+  const messageID = telegramMessageID(item);
+  const source = telegramSourceForBrowseItem(item);
+  if (!source || !messageID) {
+    error.value = "Could not resolve the Telegram source for this message";
+    return;
+  }
+  error.value = "";
+  clearNotice();
+  loading.value = true;
+  try {
+    const result = await api<{ task: Task; duplicate?: boolean }>("/api/import/telegram", {
+      method: "POST",
+      body: JSON.stringify({
+        source_id: source.id,
+        message_id: messageID,
+        create_game: false
+      })
+    });
+    showNotice(result.duplicate ? "Telegram import already running" : "Telegram import started");
+    lastImportTaskId.value = result.task.id;
+    persistLastImportTaskId();
+    selectedTask.value = result.task;
+    await loadTasks();
+  } catch (err) {
+    error.value = toMessage(err);
+  } finally {
+    loading.value = false;
+  }
+}
+
+function telegramSourceForBrowseItem(item: AdapterListItem) {
+  const peerID = item.external_id.split(":")[0] ?? "";
+  return telegramSources.value.find((source) => telegramSourcePeerID(source) === peerID) ?? null;
+}
+
+function telegramSourcePeerID(source: Source) {
+  try {
+    const parsed = JSON.parse(source.config_json || "{}") as { peer_id?: unknown };
+    return typeof parsed.peer_id === "string" ? parsed.peer_id : "";
+  } catch {
+    return "";
+  }
+}
+
+function telegramMessageID(item: AdapterListItem) {
+  const raw = item.external_id.split(":").at(-1) ?? "";
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function telegramConfigPayload() {
+  const apiID = Number(telegramAuthDraft.api_id);
+  return {
+    api_id: Number.isFinite(apiID) ? apiID : 0,
+    api_hash: telegramAuthDraft.api_hash.trim(),
+    phone: telegramAuthDraft.phone.trim()
+  };
+}
+
+async function loadTelegramStatus() {
+  telegramLoading.value = true;
+  try {
+    const status = await api<TelegramStatus>("/api/telegram/status");
+    telegramStatus.value = status;
+    if (status.phone && !telegramAuthDraft.phone) {
+      telegramAuthDraft.phone = status.phone.startsWith("+") ? status.phone : `+${status.phone}`;
+    }
+  } catch (err) {
+    telegramStatus.value = { configured: false, authorized: false, error: toMessage(err) };
+  } finally {
+    telegramLoading.value = false;
+  }
+}
+
+async function sendTelegramCode() {
+  error.value = "";
+  clearNotice();
+  telegramLoading.value = true;
+  try {
+    const result = await api<TelegramSendCodeResult>("/api/telegram/auth/send-code", {
+      method: "POST",
+      body: JSON.stringify(telegramConfigPayload())
+    });
+    telegramCodeSent.value = result.code_sent;
+    telegramStatus.value = result.status;
+    showNotice(`Telegram code sent${result.timeout ? `, expires in ${result.timeout}s` : ""}`);
+  } catch (err) {
+    error.value = toMessage(err);
+  } finally {
+    telegramLoading.value = false;
+  }
+}
+
+async function signInTelegram() {
+  error.value = "";
+  clearNotice();
+  telegramLoading.value = true;
+  try {
+    const result = await api<TelegramSignInResult>("/api/telegram/auth/sign-in", {
+      method: "POST",
+      body: JSON.stringify({
+        ...telegramConfigPayload(),
+        code: telegramAuthDraft.code.trim(),
+        password: telegramAuthDraft.password
+      })
+    });
+    telegramPasswordRequired.value = result.password_required;
+    telegramStatus.value = result.status;
+    if (result.password_required) {
+      telegramAuthDraft.code = "";
+      showNotice("Telegram 2FA password required");
+    } else {
+      telegramAuthDraft.code = "";
+      telegramAuthDraft.password = "";
+      telegramCodeSent.value = false;
+      showNotice("Telegram account authorized");
+      await loadTelegramDialogs();
+    }
+  } catch (err) {
+    error.value = toMessage(err);
+  } finally {
+    telegramLoading.value = false;
+  }
+}
+
+async function loadTelegramDialogs() {
+  error.value = "";
+  clearNotice();
+  telegramLoading.value = true;
+  try {
+    telegramDialogs.value = await api<TelegramDialog[]>("/api/telegram/dialogs?limit=100");
+    showNotice("Telegram dialogs loaded");
+  } catch (err) {
+    error.value = toMessage(err);
+  } finally {
+    telegramLoading.value = false;
+  }
+}
+
+function telegramDialogSaved(dialog: TelegramDialog) {
+  return sources.value.some((source) => source.type === "telegram" && source.url === dialog.source_url);
+}
+
+async function saveTelegramDialog(dialog: TelegramDialog) {
+  if (telegramDialogSaved(dialog)) {
+    return;
+  }
+  error.value = "";
+  clearNotice();
+  telegramSavingSourceURL.value = dialog.source_url;
+  try {
+    await api<Source>("/api/telegram/sources", {
+      method: "POST",
+      body: JSON.stringify({ dialog })
+    });
+    showNotice("Telegram source saved");
+    await loadLibrary();
+  } catch (err) {
+    error.value = toMessage(err);
+  } finally {
+    telegramSavingSourceURL.value = "";
+  }
 }
 
 function adapterBrowseCoverSrc(item: AdapterListItem) {
@@ -1255,7 +1644,7 @@ function isTaskActive(task: Task) {
 }
 
 function canRetryTask(task: Task) {
-  return task.status === "failed" && task.kind === "import:f95zone";
+  return task.status === "failed" && (task.kind === "import:f95zone" || task.kind === "import:telegram");
 }
 
 function isTaskRetried(task: Task) {
@@ -1373,7 +1762,22 @@ function formatBoolean(value?: boolean | null) {
 }
 
 function displayTranscriptSections(transcript?: Transcript | null) {
-  const hidden = new Set(["overview", "story", "description", "changelog", "change log", "download", "downloads"]);
+  const hidden = new Set([
+    "overview",
+    "story",
+    "description",
+    "changelog",
+    "change log",
+    "download",
+    "downloads",
+    "游戏介绍",
+    "介绍",
+    "故事梗概",
+    "剧情梗概",
+    "更新介绍",
+    "更新内容",
+    "更新日志"
+  ]);
   return (transcript?.sections ?? []).filter((section) => !hidden.has(section.heading.trim().toLowerCase()));
 }
 
@@ -1525,6 +1929,7 @@ function restoreAdapterBrowseState() {
       import_mode?: unknown;
       draft?: Partial<typeof adapterBrowseDraftDefaults>;
       page?: AdapterBrowsePage | null;
+      telegram_source_ids?: unknown;
     };
     if (typeof state.selected_adapter_id === "string" && state.selected_adapter_id) {
       selectedAdapterId.value = state.selected_adapter_id;
@@ -1538,9 +1943,17 @@ function restoreAdapterBrowseState() {
       url: typeof draft.url === "string" ? draft.url : adapterBrowseDraftDefaults.url,
       filter_url: typeof draft.filter_url === "string" ? draft.filter_url : adapterBrowseDraftDefaults.filter_url,
       page: typeof draft.page === "number" && Number.isFinite(draft.page) ? draft.page : adapterBrowseDraftDefaults.page,
+      limit: typeof draft.limit === "number" && Number.isFinite(draft.limit) ? draft.limit : adapterBrowseDraftDefaults.limit,
+      offset_id: typeof draft.offset_id === "number" && Number.isFinite(draft.offset_id) ? draft.offset_id : adapterBrowseDraftDefaults.offset_id,
+      search: typeof draft.search === "string" ? draft.search : adapterBrowseDraftDefaults.search,
       sort: typeof draft.sort === "string" ? draft.sort : adapterBrowseDraftDefaults.sort,
       proxy_url: typeof draft.proxy_url === "string" ? draft.proxy_url : adapterBrowseDraftDefaults.proxy_url
     });
+    if (Array.isArray(state.telegram_source_ids)) {
+      selectedTelegramSourceIds.value = state.telegram_source_ids
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value > 0);
+    }
     adapterBrowsePage.value = state.page && Array.isArray(state.page.items) ? state.page : null;
     prepareAdapterCoverStates(adapterBrowsePage.value);
   } catch {
@@ -1581,6 +1994,7 @@ function persistAdapterBrowseState() {
         selected_adapter_id: selectedAdapterId.value,
         import_mode: importMode.value,
         draft: adapterBrowseDraft,
+        telegram_source_ids: selectedTelegramSourceIds.value,
         page: adapterBrowsePage.value
       })
     );
@@ -1610,6 +2024,26 @@ watch(adapterBrowseDraft, persistAdapterBrowseState, { deep: true });
 watch(adapterBrowsePage, persistAdapterBrowseState, { deep: true });
 
 watch(selectedAdapterId, persistAdapterBrowseState);
+
+watch(selectedTelegramSourceIds, () => {
+  adapterBrowseDraft.offset_id = 0;
+  if (selectedTelegramSourceIds.value.length !== 1) {
+    adapterBrowseDraft.search = "";
+  }
+  if (selectedAdapterId.value === "telegram") {
+    adapterBrowsePage.value = null;
+  }
+  persistAdapterBrowseState();
+}, { deep: true });
+
+watch(selectedAdapterId, (adapterID) => {
+  if (adapterID === "telegram") {
+    if (importMode.value === "direct") {
+      importMode.value = "browse";
+    }
+    void loadTelegramStatus();
+  }
+});
 
 watch(importMode, persistAdapterBrowseState);
 
@@ -1644,6 +2078,9 @@ onMounted(() => {
   restoreImportState();
   restoreAdapterBrowseState();
   void loadAll();
+  if (selectedAdapterId.value === "telegram") {
+    void loadTelegramStatus();
+  }
   window.addEventListener("keydown", handlePreviewKeydown);
   taskPoll = window.setInterval(() => {
     void loadTasks().catch((err) => {
@@ -2097,7 +2534,113 @@ onUnmounted(() => {
             </dl>
           </div>
 
-            <div class="detail-pane auth-pane">
+            <div v-if="selectedAdapter.id === 'telegram'" class="detail-pane auth-pane telegram-auth-pane">
+              <div class="pane-title">
+                <h2>Telegram Account</h2>
+                <span class="status-pill" :class="telegramAuthClass">{{ telegramAuthLabel }}</span>
+              </div>
+
+              <dl class="meta-grid">
+                <div>
+                  <span>Account</span>
+                  <strong>{{ telegramAccountName }}</strong>
+                </div>
+                <div>
+                  <span>Phone</span>
+                  <strong>{{ telegramStatus.phone || telegramAuthDraft.phone || "Not saved" }}</strong>
+                </div>
+                <div>
+                  <span>User ID</span>
+                  <strong>{{ telegramStatus.user_id || "Unknown" }}</strong>
+                </div>
+                <div>
+                  <span>Groups loaded</span>
+                  <strong>{{ telegramDialogs.length }}</strong>
+                </div>
+                <div class="wide">
+                  <span>API setup</span>
+                  <strong>Use your own Telegram API ID/hash from my.telegram.org, then sign in with a phone code.</strong>
+                </div>
+                <div v-if="telegramStatus.error" class="wide">
+                  <span>Status error</span>
+                  <strong>{{ telegramStatus.error }}</strong>
+                </div>
+              </dl>
+
+              <div class="telegram-auth-grid">
+                <label>
+                  <span>API ID</span>
+                  <input v-model="telegramAuthDraft.api_id" inputmode="numeric" placeholder="Stored or env if blank" />
+                </label>
+                <label>
+                  <span>API Hash</span>
+                  <input v-model="telegramAuthDraft.api_hash" type="password" placeholder="Stored or env if blank" />
+                </label>
+                <label>
+                  <span>Phone</span>
+                  <input v-model="telegramAuthDraft.phone" type="tel" placeholder="+1..." />
+                </label>
+                <div class="form-action-cell">
+                  <button class="secondary" :disabled="telegramLoading" @click="sendTelegramCode">
+                    <Icon name="refresh" :size="17" />
+                    <span>Send code</span>
+                  </button>
+                </div>
+                <label>
+                  <span>Login code</span>
+                  <input v-model="telegramAuthDraft.code" inputmode="numeric" autocomplete="one-time-code" />
+                </label>
+                <label>
+                  <span>2FA password</span>
+                  <input v-model="telegramAuthDraft.password" type="password" :placeholder="telegramPasswordRequired ? 'Required' : 'If enabled'" />
+                </label>
+                <div class="form-action-cell">
+                  <button class="primary" :disabled="telegramLoading || !canSubmitTelegramSignIn" @click="signInTelegram">
+                    <Icon name="check" :size="17" />
+                    <span>Sign in</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="telegram-dialog-toolbar">
+                <div class="searchbox">
+                  <Icon name="search" :size="17" />
+                  <input v-model="telegramDialogQuery" type="search" placeholder="Filter loaded groups" />
+                </div>
+                <button class="primary" :disabled="telegramLoading || !telegramStatus.authorized" @click="loadTelegramDialogs">
+                  <Icon name="refresh" :size="17" />
+                  <span>{{ telegramLoading ? "Loading" : "Load groups" }}</span>
+                </button>
+              </div>
+
+              <div v-if="filteredTelegramDialogs.length" class="telegram-dialog-list">
+                <div v-for="dialog in filteredTelegramDialogs" :key="dialog.source_url" class="telegram-dialog-row">
+                  <span class="source-dot"></span>
+                  <span class="row-main">
+                    <strong>{{ dialog.title }}</strong>
+                    <small>
+                      {{ dialog.type }} · {{ dialog.username ? `@${dialog.username}` : dialog.peer_id }}
+                      <template v-if="dialog.participants"> · {{ dialog.participants }} members</template>
+                    </small>
+                  </span>
+                  <button
+                    class="secondary"
+                    :disabled="telegramDialogSaved(dialog) || telegramSavingSourceURL === dialog.source_url"
+                    @click="saveTelegramDialog(dialog)"
+                  >
+                    <Icon :name="telegramDialogSaved(dialog) ? 'check' : 'save'" :size="17" />
+                    <span>{{ telegramDialogSaved(dialog) ? "Saved" : telegramSavingSourceURL === dialog.source_url ? "Saving" : "Save source" }}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div v-else class="auth-guide">
+                <strong>{{ telegramStatus.authorized ? "No groups loaded" : "Telegram account is not authorized" }}</strong>
+                <p>{{ telegramStatus.authorized ? "Load groups to choose Telegram sources." : "Send a login code, sign in, then load the groups and channels visible to your account." }}</p>
+              </div>
+            </div>
+
+            <div v-else class="detail-pane auth-pane">
               <div class="pane-title">
                 <h2>{{ selectedAdapter.name }} Cookies</h2>
                 <span class="status-pill" :class="adapterAuthStatusClass(selectedAdapterAuthProfile, selectedAdapter)">
@@ -2176,7 +2719,7 @@ onUnmounted(() => {
             :class="{ active: importMode === 'browse' }"
             role="tab"
             :aria-selected="importMode === 'browse'"
-            @click="importMode = 'browse'"
+            @click="setImportMode('browse')"
           >
             <Icon name="globe" :size="17" />
             <span>Browse Source</span>
@@ -2187,7 +2730,8 @@ onUnmounted(() => {
             :class="{ active: importMode === 'direct' }"
             role="tab"
             :aria-selected="importMode === 'direct'"
-            @click="importMode = 'direct'"
+            :disabled="selectedAdapter.id !== 'f95zone'"
+            @click="setImportMode('direct')"
           >
             <Icon name="link" :size="17" />
             <span>Direct URL</span>
@@ -2285,66 +2829,119 @@ onUnmounted(() => {
           <div class="adapter-browser-controls">
             <label>
               <span>Adapter</span>
-              <select v-model="selectedAdapterId" @change="resetAdapterBrowse">
+              <select :value="selectedAdapterId" @change="changeImportAdapter">
                 <option v-for="adapter in availableAdapters" :key="adapter.id" :value="adapter.id">
                   {{ adapter.name }}
                 </option>
               </select>
             </label>
-            <label>
-              <span>Preset</span>
-              <select v-model="adapterBrowseDraft.preset_id" :disabled="!adapterBrowsePresets.length" @change="selectBrowsePreset(adapterBrowseDraft.preset_id)">
-                <option v-for="preset in adapterBrowsePresets" :key="preset.id" :value="preset.id">
-                  {{ preset.label }}
-                </option>
-              </select>
-            </label>
-            <label>
-              <span>Page</span>
-              <input
-                v-model.number="adapterBrowseDraft.page"
-                type="number"
-                min="1"
-                :disabled="!adapterBrowseCapabilities.pagination"
-                @keydown.enter.prevent="browseAdapterList"
-              />
-            </label>
-            <label>
-              <span>Source filter</span>
-              <select
-                :value="adapterBrowseDraft.filter_url"
-                :disabled="!adapterBrowseCapabilities.filter || adapterBrowseFilters.length === 0"
-                @change="selectBrowseFilterFromEvent"
-              >
-                <option value="">None</option>
-                <option v-for="filter in adapterBrowseFilters" :key="filter.id" :value="filter.url">
-                  {{ filter.label }}{{ filter.count ? ` (${filter.count})` : "" }}
-                </option>
-              </select>
-            </label>
-            <label>
-              <span>Source search</span>
-              <input type="search" :disabled="!adapterBrowseCapabilities.search" :placeholder="adapterBrowseCapabilities.search ? 'Search source' : 'Disabled for this adapter'" />
-            </label>
-            <label>
-              <span>Sort by</span>
-              <select v-model="adapterBrowseDraft.sort" :disabled="!adapterBrowseCapabilities.sort">
-                <option value="">Source default</option>
-              </select>
-            </label>
-            <label class="wide">
-              <span>List URL</span>
-              <input v-model="adapterBrowseDraft.url" type="url" :disabled="!adapterBrowseCapabilities.custom_url" placeholder="Use preset, source filter, or paste a list URL" />
-            </label>
-            <div class="form-action-cell">
-              <button class="primary" :disabled="adapterBrowsing || !selectedAdapter.browse.enabled" @click="browseAdapterList">
-                <Icon name="refresh" :size="17" />
-                <span>{{ adapterBrowsing ? "Loading" : "Load" }}</span>
+            <template v-if="selectedAdapter.id !== 'telegram'">
+              <label>
+                <span>Source list</span>
+                <select v-model="adapterBrowseDraft.preset_id" :disabled="!adapterBrowsePresets.length" @change="selectBrowsePreset(adapterBrowseDraft.preset_id)">
+                  <option v-for="preset in adapterBrowsePresets" :key="preset.id" :value="preset.id">
+                    {{ preset.label }}
+                  </option>
+                </select>
+              </label>
+              <label>
+                <span>Page</span>
+                <input
+                  v-model.number="adapterBrowseDraft.page"
+                  type="number"
+                  min="1"
+                  :disabled="!adapterBrowseCapabilities.pagination"
+                  @keydown.enter.prevent="browseAdapterList()"
+                />
+              </label>
+              <label>
+                <span>Source filter</span>
+                <select
+                  :value="adapterBrowseDraft.filter_url"
+                  :disabled="!adapterBrowseCapabilities.filter || adapterBrowseFilters.length === 0"
+                  @change="selectBrowseFilterFromEvent"
+                >
+                  <option value="">None</option>
+                  <option v-for="filter in adapterBrowseFilters" :key="filter.id" :value="filter.url">
+                    {{ filter.label }}{{ filter.count ? ` (${filter.count})` : "" }}
+                  </option>
+                </select>
+              </label>
+              <label>
+                <span>Source search</span>
+                <input type="search" :disabled="!adapterBrowseCapabilities.search" :placeholder="adapterBrowseCapabilities.search ? 'Search source' : 'Disabled for this adapter'" />
+              </label>
+              <label>
+                <span>Sort by</span>
+                <select v-model="adapterBrowseDraft.sort" :disabled="!adapterBrowseCapabilities.sort">
+                  <option value="">Source default</option>
+                </select>
+              </label>
+              <label class="wide">
+                <span>List URL</span>
+                <input v-model="adapterBrowseDraft.url" type="url" :disabled="!adapterBrowseCapabilities.custom_url" placeholder="Use source list, source filter, or paste a list URL" />
+              </label>
+              <div class="form-action-cell">
+                <button class="primary" :disabled="adapterBrowsing || !selectedAdapter.browse.enabled" @click="browseAdapterList()">
+                  <Icon name="refresh" :size="17" />
+                  <span>{{ adapterBrowsing ? "Loading" : "Load" }}</span>
+                </button>
+              </div>
+            </template>
+            <template v-else>
+              <label>
+                <span>Source search</span>
+                <input
+                  v-model="adapterBrowseDraft.search"
+                  type="search"
+                  :disabled="telegramSearchDisabled"
+                  :placeholder="telegramSearchDisabled ? 'Select one group to search' : 'Search messages in selected group'"
+                  @keydown.enter.prevent="browseAdapterList(true)"
+                />
+              </label>
+              <label>
+                <span>Messages</span>
+                <input v-model.number="adapterBrowseDraft.limit" type="number" min="1" max="100" @keydown.enter.prevent="browseAdapterList(true)" />
+              </label>
+              <div class="form-action-cell">
+                <button class="primary" :disabled="!canLoadTelegramMessages" @click="browseAdapterList(true)">
+                  <Icon name="refresh" :size="17" />
+                  <span>{{ adapterBrowsing ? "Loading" : "Load messages" }}</span>
+                </button>
+              </div>
+            </template>
+          </div>
+
+          <div v-if="selectedAdapter.id === 'telegram'" class="telegram-source-picker">
+            <div class="adapter-browser-summary">
+              <div>
+                <strong>Telegram groups</strong>
+                <small>{{ selectedTelegramSources.length }} selected · {{ telegramSources.length }} saved</small>
+              </div>
+              <button class="secondary" @click="view = 'adapters'; selectedAdapterId = 'telegram'">
+                <Icon name="cable" :size="17" />
+                <span>Manage</span>
+              </button>
+            </div>
+            <div v-if="telegramSources.length" class="telegram-source-list">
+              <label v-for="source in telegramSources" :key="source.id" class="telegram-source-option">
+                <input v-model="selectedTelegramSourceIds" type="checkbox" :value="source.id" />
+                <span class="row-main">
+                  <strong>{{ source.name }}</strong>
+                  <small>{{ source.url }}</small>
+                </span>
+              </label>
+            </div>
+            <div v-else class="empty-detail">
+              <strong>No Telegram sources saved</strong>
+              <button class="secondary" @click="view = 'adapters'; selectedAdapterId = 'telegram'">
+                <Icon name="cable" :size="17" />
+                <span>Choose groups</span>
               </button>
             </div>
           </div>
 
-          <div class="capability-note-row">
+          <div v-if="selectedAdapter.id !== 'telegram'" class="capability-note-row">
             <span v-if="!adapterBrowseCapabilities.search">{{ adapterBrowseCapabilities.search_note }}</span>
             <span v-if="!adapterBrowseCapabilities.sort">{{ adapterBrowseCapabilities.sort_note }}</span>
           </div>
@@ -2353,17 +2950,23 @@ onUnmounted(() => {
             <div>
               <strong>{{ adapterBrowsePage.title || selectedAdapter.name }}</strong>
               <small>
-                Page {{ adapterBrowsePage.page }}{{ adapterBrowsePage.total_pages ? ` / ${adapterBrowsePage.total_pages}` : "" }} · {{ adapterBrowsePage.items.length }} shown
+                <template v-if="selectedAdapter.id === 'telegram'">
+                  {{ adapterBrowsePage.items.length }} shown
+                  <template v-if="adapterBrowseDraft.search"> · search "{{ adapterBrowseDraft.search }}"</template>
+                </template>
+                <template v-else>
+                  Page {{ adapterBrowsePage.page }}{{ adapterBrowsePage.total_pages ? ` / ${adapterBrowsePage.total_pages}` : "" }} · {{ adapterBrowsePage.items.length }} shown
+                </template>
                 <template v-if="adapterBrowseLoadingCovers"> · {{ adapterBrowseLoadingCovers }} covers loading</template>
               </small>
             </div>
             <div class="button-row">
-              <button class="secondary" :disabled="!adapterBrowsePage.prev_url || adapterBrowsing" @click="goBrowsePage(-1)">
+              <button v-if="selectedAdapter.id !== 'telegram'" class="secondary" :disabled="!adapterBrowsePage.prev_url || adapterBrowsing" @click="goBrowsePage(-1)">
                 <Icon name="arrow-left" :size="17" />
                 <span>Prev</span>
               </button>
-              <button class="secondary" :disabled="!adapterBrowsePage.next_url || adapterBrowsing" @click="goBrowsePage(1)">
-                <span>Next</span>
+              <button class="secondary" :disabled="!(selectedAdapter.id === 'telegram' ? telegramOlderOffsetID : adapterBrowsePage.next_url) || adapterBrowsing" @click="goBrowsePage(1)">
+                <span>{{ selectedAdapter.id === "telegram" ? "Older" : "Next" }}</span>
                 <Icon name="arrow-right" :size="17" />
               </button>
             </div>
@@ -2376,6 +2979,15 @@ onUnmounted(() => {
           <div v-if="adapterBrowsePage" class="adapter-result-list">
             <div v-for="item in adapterBrowsePage.items" :key="item.url" class="adapter-result-row">
               <button
+                v-if="item.adapter_id === 'telegram'"
+                class="adapter-result-cover is-message"
+                type="button"
+                disabled
+              >
+                <Icon name="file-search" :size="22" />
+              </button>
+              <button
+                v-else
                 class="adapter-result-cover"
                 :class="`is-${adapterBrowseCoverStatus(item)}`"
                 type="button"
@@ -2408,6 +3020,7 @@ onUnmounted(() => {
                   {{ item.author || "Unknown author" }}
                   <template v-if="item.latest_at"> · updated {{ formatTimestamp(item.latest_at, item.latest_at) }}</template>
                 </small>
+                <p v-if="item.summary" class="adapter-result-summary">{{ item.summary }}</p>
                 <div v-if="item.prefixes?.length" class="tag-row">
                   <span v-for="tag in item.prefixes" :key="`${item.url}-${tag}`">{{ tag }}</span>
                 </div>
@@ -2434,7 +3047,7 @@ onUnmounted(() => {
             </div>
           </div>
           <div v-else class="empty-detail">
-            <strong>Load a source list to browse import candidates</strong>
+            <strong>{{ selectedAdapter.id === "telegram" ? "Choose sources and load Telegram messages" : "Load a source list to browse import candidates" }}</strong>
           </div>
         </div>
 
