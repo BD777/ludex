@@ -49,6 +49,10 @@ const (
 	maxCachedImages = 32
 	maxHTMLBytes    = 20 << 20
 	maxMediaBytes   = 25 << 20
+
+	defaultFetchTimeout = 45 * time.Second
+	mediaFetchTimeout   = 90 * time.Second
+	mediaFetchAttempts  = 3
 )
 
 func New(store *storage.Store) http.Handler {
@@ -1146,7 +1150,11 @@ func (s *Server) findCachedMediaAsset(ctx context.Context, sourceItemID int64, o
 }
 
 func (s *Server) cacheMediaAsset(ctx context.Context, rawURL string, sourceItemID *int64, proxyURL string, authProfile *domain.AuthProfile) (domain.MediaAsset, error) {
-	body, contentType, err := fetchBytes(ctx, rawURL, proxyURL, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", maxMediaBytes, authProfile)
+	body, contentType, err := fetchBytesWithPolicy(ctx, rawURL, proxyURL, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", maxMediaBytes, authProfile, fetchPolicy{
+		Timeout:  mediaFetchTimeout,
+		Attempts: mediaFetchAttempts,
+		Backoff:  []time.Duration{1 * time.Second, 3 * time.Second},
+	})
 	if err != nil {
 		return domain.MediaAsset{}, err
 	}
@@ -1263,6 +1271,109 @@ func fetchURL(ctx context.Context, rawURL string, proxyURL string, authProfile *
 }
 
 func fetchBytes(ctx context.Context, rawURL string, proxyURL string, accept string, maxBytes int64, authProfile *domain.AuthProfile) ([]byte, string, error) {
+	return fetchBytesWithPolicy(ctx, rawURL, proxyURL, accept, maxBytes, authProfile, fetchPolicy{
+		Timeout:  defaultFetchTimeout,
+		Attempts: 1,
+	})
+}
+
+type fetchPolicy struct {
+	Timeout  time.Duration
+	Attempts int
+	Backoff  []time.Duration
+}
+
+type httpStatusError struct {
+	URL        string
+	StatusCode int
+	Status     string
+}
+
+func (e httpStatusError) Error() string {
+	return fmt.Sprintf("fetch %s: %s", e.URL, e.Status)
+}
+
+func fetchBytesWithPolicy(ctx context.Context, rawURL string, proxyURL string, accept string, maxBytes int64, authProfile *domain.AuthProfile, policy fetchPolicy) ([]byte, string, error) {
+	if policy.Timeout <= 0 {
+		policy.Timeout = defaultFetchTimeout
+	}
+	if policy.Attempts <= 0 {
+		policy.Attempts = 1
+	}
+	var lastErr error
+	attemptsMade := 0
+	for attempt := 1; attempt <= policy.Attempts; attempt++ {
+		attemptsMade = attempt
+		body, contentType, err := fetchBytesOnce(ctx, rawURL, proxyURL, accept, maxBytes, authProfile, policy.Timeout)
+		if err == nil {
+			return body, contentType, nil
+		}
+		lastErr = err
+		if attempt == policy.Attempts || !isRetryableFetchError(err) || ctx.Err() != nil {
+			break
+		}
+		backoff := fetchRetryBackoff(policy, attempt)
+		if backoff <= 0 {
+			continue
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, "", ctx.Err()
+		case <-timer.C:
+		}
+	}
+	if attemptsMade > 1 {
+		return nil, "", fmt.Errorf("download failed after %d attempts: %w", attemptsMade, lastErr)
+	}
+	return nil, "", lastErr
+}
+
+func fetchRetryBackoff(policy fetchPolicy, attempt int) time.Duration {
+	if attempt <= 0 {
+		return 0
+	}
+	if attempt <= len(policy.Backoff) {
+		return policy.Backoff[attempt-1]
+	}
+	return time.Duration(attempt) * time.Second
+}
+
+func isRetryableFetchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var statusErr httpStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode == http.StatusTooManyRequests || statusErr.StatusCode >= 500
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	retryableFragments := []string{
+		"client.timeout",
+		"context deadline exceeded",
+		"connection reset",
+		"broken pipe",
+		"unexpected eof",
+		"tls handshake timeout",
+		"http2: stream closed",
+	}
+	for _, fragment := range retryableFragments {
+		if strings.Contains(message, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func fetchBytesOnce(ctx context.Context, rawURL string, proxyURL string, accept string, maxBytes int64, authProfile *domain.AuthProfile, timeout time.Duration) ([]byte, string, error) {
 	transport := &http.Transport{}
 	if proxyURL != "" {
 		parsedProxy, err := url.Parse(proxyURL)
@@ -1290,7 +1401,7 @@ func fetchBytes(ctx context.Context, rawURL string, proxyURL string, accept stri
 
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   45 * time.Second,
+		Timeout:   timeout,
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -1315,7 +1426,7 @@ func fetchBytes(ctx context.Context, rawURL string, proxyURL string, accept stri
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return nil, "", fmt.Errorf("fetch %s: %s", rawURL, resp.Status)
+		return nil, "", httpStatusError{URL: rawURL, StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
