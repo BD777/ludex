@@ -1234,11 +1234,6 @@ onUnmounted(() => {
           <Icon name="search" :size="17" />
           <input v-model="query" type="search" placeholder="Search games" />
         </div>
-        <div class="status-line" aria-live="polite">
-          <span v-if="loading">Loading</span>
-          <span v-else-if="error" class="error">{{ error }}</span>
-          <span v-else-if="activeTasks.length">{{ activeTasks.length }} active task{{ activeTasks.length === 1 ? "" : "s" }}</span>
-        </div>
         <button class="icon-button" title="Refresh" @click="loadAll">
           <Icon name="refresh" :size="18" />
         </button>
@@ -2258,10 +2253,10 @@ onUnmounted(() => {
     </div>
 
     <Transition name="toast">
-      <div v-if="notice" class="toast-layer" role="status" aria-live="polite">
-        <div class="toast">
-          <Icon name="check" :size="17" />
-          <span>{{ notice }}</span>
+      <div v-if="notice || error" class="toast-layer" role="status" aria-live="polite">
+        <div class="toast" :class="{ error: !notice && Boolean(error) }">
+          <Icon :name="notice ? 'check' : 'x'" :size="17" />
+          <span>{{ notice || error }}</span>
         </div>
       </div>
     </Transition>

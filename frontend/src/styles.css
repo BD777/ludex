@@ -103,7 +103,7 @@ button {
 .topbar {
   display: grid;
   grid-template-columns: minmax(220px, 420px) minmax(0, 1fr) 40px;
-  grid-template-areas: "search status refresh";
+  grid-template-areas: "search . refresh";
   align-items: center;
   gap: 14px;
   padding: 12px 22px;
@@ -131,15 +131,6 @@ button {
   border: 0;
   outline: 0;
   background: transparent;
-}
-
-.status-line {
-  grid-area: status;
-  min-width: 0;
-  overflow: hidden;
-  color: #667269;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .error {
@@ -1228,6 +1219,13 @@ dd {
   color: #20583f;
   background: #f3faf5;
   box-shadow: 0 14px 36px rgba(31, 53, 47, 0.18);
+}
+
+.toast.error {
+  color: #8f3030;
+  border-color: #e0bcbc;
+  background: #fff6f4;
+  box-shadow: 0 14px 36px rgba(105, 37, 37, 0.16);
 }
 
 .toast span {
