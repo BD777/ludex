@@ -210,6 +210,7 @@ const deleting = ref(false);
 const previewImage = ref("");
 const previewSequence = ref<string[]>([]);
 const gamePanelMode = ref<GamePanelMode>("detail");
+const taskHistoryExpanded = ref(false);
 const matchEditing = ref(false);
 const mediaRetrying = ref(false);
 const retryingMediaURL = ref("");
@@ -340,6 +341,8 @@ const previewImageIndex = computed(() => {
 const canStepPreview = computed(() => previewSequence.value.length > 1 && previewImageIndex.value >= 0);
 
 const activeTasks = computed(() => tasks.value.filter(isTaskActive));
+
+const completedTasks = computed(() => tasks.value.filter((task) => !isTaskActive(task)));
 
 const recentImportTask = computed(() => {
   return lastImportTaskId.value ? tasks.value.find((task) => task.id === lastImportTaskId.value) ?? null : null;
@@ -503,16 +506,13 @@ async function loadLibrary() {
 async function loadTasks() {
   const hadActiveTasks = activeTasks.value.length > 0;
   const nextTasks = await api<Task[]>("/api/tasks");
+  const nextActiveTasks = nextTasks.filter(isTaskActive);
   tasks.value = nextTasks;
-  const lastImportTask = lastImportTaskId.value
-    ? nextTasks.find((task) => task.id === lastImportTaskId.value)
-    : null;
-  if (!selectedTask.value && lastImportTask) {
-    selectedTask.value = lastImportTask;
-  } else if (!selectedTask.value && nextTasks.length > 0) {
-    selectedTask.value = nextTasks[0];
-  } else if (selectedTask.value) {
-    selectedTask.value = nextTasks.find((task) => task.id === selectedTask.value?.id) ?? selectedTask.value;
+  if (selectedTask.value) {
+    selectedTask.value = nextTasks.find((task) => task.id === selectedTask.value?.id) ?? null;
+  }
+  if (!selectedTask.value && nextActiveTasks.length > 0) {
+    selectedTask.value = nextActiveTasks[0];
   }
   if (hadActiveTasks && !nextTasks.some(isTaskActive)) {
     await loadLibrary();
@@ -861,6 +861,9 @@ function selectItem(item: SourceItem) {
 function selectTask(task: Task) {
   selectedTask.value = task;
   selectedTaskSourceItemId.value = null;
+  if (!isTaskActive(task)) {
+    taskHistoryExpanded.value = true;
+  }
 }
 
 function selectTaskSourceItem(item: SourceItem) {
@@ -1790,19 +1793,57 @@ onUnmounted(() => {
               <Icon name="refresh" :size="18" />
             </button>
           </div>
-          <button
-            v-for="task in tasks"
-            :key="task.id"
-            class="row-button task-row"
-            :class="{ selected: selectedTask?.id === task.id }"
-            @click="selectTask(task)"
-          >
-            <span class="task-state" :class="task.status"></span>
-            <span class="row-main">
-              <strong>{{ task.title }}</strong>
-              <small>{{ task.status }} · {{ task.message || task.kind }}</small>
-            </span>
-          </button>
+
+          <div class="task-list-section">
+            <div class="task-section-title">
+              <span>Active</span>
+              <small>{{ activeTasks.length }}</small>
+            </div>
+            <button
+              v-for="task in activeTasks"
+              :key="task.id"
+              class="row-button task-row"
+              :class="{ selected: selectedTask?.id === task.id }"
+              @click="selectTask(task)"
+            >
+              <span class="task-state" :class="task.status"></span>
+              <span class="row-main">
+                <strong>{{ task.title }}</strong>
+                <small>{{ task.status }} · {{ task.message || task.kind }}</small>
+              </span>
+            </button>
+            <div v-if="activeTasks.length === 0" class="task-empty-row">
+              <Icon name="activity" :size="18" />
+              <strong>No active tasks</strong>
+            </div>
+          </div>
+
+          <div class="task-list-section task-history-section">
+            <button
+              class="task-history-toggle"
+              :disabled="completedTasks.length === 0"
+              @click="taskHistoryExpanded = !taskHistoryExpanded"
+            >
+              <Icon name="arrow-right" :class="{ expanded: taskHistoryExpanded }" :size="16" />
+              <span>History</span>
+              <small>{{ completedTasks.length }}</small>
+            </button>
+            <template v-if="taskHistoryExpanded">
+              <button
+                v-for="task in completedTasks"
+                :key="task.id"
+                class="row-button task-row completed"
+                :class="{ selected: selectedTask?.id === task.id }"
+                @click="selectTask(task)"
+              >
+                <span class="task-state" :class="task.status"></span>
+                <span class="row-main">
+                  <strong>{{ task.title }}</strong>
+                  <small>{{ task.status }} · {{ task.message || task.kind }}</small>
+                </span>
+              </button>
+            </template>
+          </div>
         </div>
 
         <div v-if="selectedTask" class="detail-pane task-detail">
@@ -1917,6 +1958,12 @@ onUnmounted(() => {
               </div>
             </div>
           </section>
+        </div>
+        <div v-else class="detail-pane">
+          <div class="empty-detail">
+            <Icon name="activity" :size="24" />
+            <strong>No task selected</strong>
+          </div>
         </div>
       </section>
 
