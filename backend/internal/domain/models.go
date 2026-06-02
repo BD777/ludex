@@ -24,6 +24,86 @@ type Source struct {
 	UpdatedAt  string `json:"updated_at"`
 }
 
+type Adapter struct {
+	ID              string                `json:"id"`
+	Name            string                `json:"name"`
+	Kind            string                `json:"kind"`
+	Status          string                `json:"status"`
+	Input           string                `json:"input"`
+	Dedupe          string                `json:"dedupe"`
+	Endpoint        string                `json:"endpoint"`
+	Attachments     string                `json:"attachments"`
+	AuthDomain      string                `json:"auth_domain"`
+	AuthCookieNames []string              `json:"auth_cookie_names"`
+	WithoutBridge   string                `json:"without_bridge"`
+	Browse          AdapterBrowseManifest `json:"browse"`
+}
+
+type AdapterBrowseManifest struct {
+	Enabled      bool                      `json:"enabled"`
+	Description  string                    `json:"description"`
+	Presets      []AdapterBrowsePreset     `json:"presets"`
+	Capabilities AdapterBrowseCapabilities `json:"capabilities"`
+}
+
+type AdapterBrowseCapabilities struct {
+	CustomURL  bool   `json:"custom_url"`
+	Pagination bool   `json:"pagination"`
+	Search     bool   `json:"search"`
+	Filter     bool   `json:"filter"`
+	Sort       bool   `json:"sort"`
+	Import     bool   `json:"import"`
+	SearchNote string `json:"search_note"`
+	FilterNote string `json:"filter_note"`
+	SortNote   string `json:"sort_note"`
+}
+
+type AdapterBrowsePreset struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+	URL         string `json:"url"`
+}
+
+type AdapterBrowseFilter struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Count string `json:"count"`
+	URL   string `json:"url"`
+}
+
+type AdapterListItem struct {
+	AdapterID  string   `json:"adapter_id"`
+	ExternalID string   `json:"external_id"`
+	Title      string   `json:"title"`
+	URL        string   `json:"url"`
+	Author     string   `json:"author"`
+	StartedAt  string   `json:"started_at"`
+	LatestAt   string   `json:"latest_at"`
+	LatestBy   string   `json:"latest_by"`
+	Prefixes   []string `json:"prefixes"`
+	Tags       []string `json:"tags"`
+	Replies    string   `json:"replies"`
+	Views      string   `json:"views"`
+	Rating     string   `json:"rating"`
+	Votes      string   `json:"votes"`
+	Importable bool     `json:"importable"`
+}
+
+type AdapterBrowsePage struct {
+	AdapterID    string                    `json:"adapter_id"`
+	Title        string                    `json:"title"`
+	URL          string                    `json:"url"`
+	Page         int                       `json:"page"`
+	TotalPages   int                       `json:"total_pages"`
+	PrevURL      string                    `json:"prev_url"`
+	NextURL      string                    `json:"next_url"`
+	Items        []AdapterListItem         `json:"items"`
+	Filters      []AdapterBrowseFilter     `json:"filters"`
+	Warnings     []string                  `json:"warnings"`
+	Capabilities AdapterBrowseCapabilities `json:"capabilities"`
+}
+
 type AuthProfile struct {
 	ID              int64        `json:"id"`
 	AdapterID       string       `json:"adapter_id"`

@@ -158,3 +158,77 @@ func TestParseHTMLExtractsSanitizedChangelogHTML(t *testing.T) {
 		t.Fatalf("changelog html was not sanitized or bounded: %q", transcript.Fields.ChangelogHTML)
 	}
 }
+
+func TestParseBrowsePageExtractsThreadRowsAndFilters(t *testing.T) {
+	html := `
+	<html>
+		<body>
+			<h1 class="p-title-value">Games</h1>
+			<nav class="pageNavWrapper">
+				<a href="/forums/games.2/page-2" class="pageNav-jump pageNav-jump--next">Next</a>
+				<ul class="pageNav-main">
+					<li class="pageNav-page pageNav-page--current"><a href="/forums/games.2/">1</a></li>
+					<li class="pageNav-page"><a href="/forums/games.2/page-1299">1299</a></li>
+				</ul>
+			</nav>
+			<ul class="filterBar">
+				<li><a class="filterBar-prefix" href="/forums/games.2/?prefix_id=13"><span>VN</span>(9341)</a></li>
+			</ul>
+			<div class="structItem structItem--thread js-threadListItem-1" data-author="Staff">
+				<i class="structItem-status structItem-status--sticky"></i>
+				<div class="structItem-title">
+					<a href="/threads/rules.1/" data-tp-primary="on">Rules</a>
+				</div>
+			</div>
+			<div class="structItem structItem--thread js-threadListItem-301024" data-author="Gameil">
+				<div class="structItem-title">
+					<a href="/forums/games.2/?prefix_id[0]=3" class="labelLink"><span>Unity</span></a>
+					<a href="/forums/games.2/?prefix_id[0]=18" class="labelLink"><span>Completed</span></a>
+					<a href="/threads/masaguri-train-groper-simulator-v1-0-team-inu-studio.301024/" data-tp-primary="on">Masaguri: Train Groper Simulator [v1.0] [Team Inu Studio]</a>
+				</div>
+				<ul class="structItem-parts">
+					<li><a class="username">Gameil</a></li>
+					<li class="structItem-startDate"><time datetime="2026-06-01T23:55:37+0100">Yesterday</time></li>
+				</ul>
+				<div class="structItem-cell--meta">
+					<dl><dt>Replies</dt><dd>27</dd></dl>
+					<dl><dt>Views</dt><dd>14K</dd></dl>
+				</div>
+				<div class="structItem-cell--latest">
+					<time class="structItem-latestDate" datetime="2026-06-02T03:10:52+0100">12 minutes ago</time>
+					<a class="username">Pukulgur</a>
+				</div>
+			</div>
+		</body>
+	</html>`
+
+	page, err := ParseBrowsePage("https://f95zone.to/forums/games.2/", strings.NewReader(html))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Title != "Games" || page.Page != 1 || page.TotalPages != 1299 {
+		t.Fatalf("page meta = %#v", page)
+	}
+	if page.NextURL != "https://f95zone.to/forums/games.2/page-2" {
+		t.Fatalf("next url = %q", page.NextURL)
+	}
+	if len(page.Filters) != 1 || page.Filters[0].Label != "VN" || page.Filters[0].Count != "9341" {
+		t.Fatalf("filters = %#v", page.Filters)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("items = %#v", page.Items)
+	}
+	item := page.Items[0]
+	if item.ExternalID != "301024" || item.Author != "Gameil" || item.LatestBy != "Pukulgur" {
+		t.Fatalf("item identity = %#v", item)
+	}
+	if item.URL != "https://f95zone.to/threads/masaguri-train-groper-simulator-v1-0-team-inu-studio.301024/" {
+		t.Fatalf("item url = %q", item.URL)
+	}
+	if strings.Join(item.Prefixes, ",") != "Unity,Completed" {
+		t.Fatalf("prefixes = %#v", item.Prefixes)
+	}
+	if item.Replies != "27" || item.Views != "14K" {
+		t.Fatalf("stats = replies %q views %q", item.Replies, item.Views)
+	}
+}

@@ -66,6 +66,9 @@ func New(store *storage.Store) http.Handler {
 	r.Get("/api/tasks", server.listTasks)
 	r.Get("/api/tasks/{taskID}", server.getTask)
 
+	r.Get("/api/adapters", server.listAdapters)
+	r.Post("/api/adapters/{adapterID}/browse", server.browseAdapter)
+
 	r.Get("/api/games", server.listGames)
 	r.Post("/api/games", server.createGame)
 	r.Get("/api/games/{gameID}", server.getGame)
@@ -162,6 +165,111 @@ func browserExtensionZip() ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func (s *Server) listAdapters(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, builtInAdapters())
+}
+
+func (s *Server) browseAdapter(w http.ResponseWriter, r *http.Request) {
+	adapterID := strings.TrimSpace(chi.URLParam(r, "adapterID"))
+	adapter, ok := builtInAdapter(adapterID)
+	if !ok {
+		writeError(w, fmt.Errorf("unknown adapter %q", adapterID))
+		return
+	}
+	if !adapter.Browse.Enabled {
+		writeError(w, fmt.Errorf("adapter %q does not support browsing", adapterID))
+		return
+	}
+
+	var req browseAdapterRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	if strings.TrimSpace(req.Search) != "" && !adapter.Browse.Capabilities.Search {
+		writeError(w, errors.New(adapter.Browse.Capabilities.SearchNote))
+		return
+	}
+	if strings.TrimSpace(req.Sort) != "" && !adapter.Browse.Capabilities.Sort {
+		writeError(w, errors.New(adapter.Browse.Capabilities.SortNote))
+		return
+	}
+	if strings.TrimSpace(req.FilterURL) != "" && !adapter.Browse.Capabilities.Filter {
+		writeError(w, errors.New(adapter.Browse.Capabilities.FilterNote))
+		return
+	}
+
+	switch adapterID {
+	case "f95zone":
+		page, err := s.browseF95zone(r.Context(), req, adapter.Browse.Capabilities)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, page)
+	default:
+		writeError(w, fmt.Errorf("adapter %q does not support browsing", adapterID))
+	}
+}
+
+func builtInAdapters() []domain.Adapter {
+	return []domain.Adapter{f95zoneAdapterDescriptor()}
+}
+
+func builtInAdapter(adapterID string) (domain.Adapter, bool) {
+	for _, adapter := range builtInAdapters() {
+		if adapter.ID == adapterID {
+			return adapter, true
+		}
+	}
+	return domain.Adapter{}, false
+}
+
+func f95zoneAdapterDescriptor() domain.Adapter {
+	return domain.Adapter{
+		ID:              "f95zone",
+		Name:            "F95zone",
+		Kind:            "Forum thread",
+		Status:          "built-in",
+		Input:           "Thread URL",
+		Dedupe:          "Thread ID",
+		Endpoint:        "/api/import/f95zone",
+		Attachments:     "Cached images",
+		AuthDomain:      "f95zone.to",
+		AuthCookieNames: []string{"xf_user"},
+		WithoutBridge:   "Download links, login-only spoilers/changelog, and some developer/social links may be unavailable.",
+		Browse: domain.AdapterBrowseManifest{
+			Enabled:     true,
+			Description: "Browse XenForo thread lists and import selected F95zone game threads.",
+			Presets: []domain.AdapterBrowsePreset{
+				{
+					ID:          "trending",
+					Label:       "Trending games",
+					Description: "F95zone trending game threads.",
+					URL:         f95zone.PresetListURL("trending", 1),
+				},
+				{
+					ID:          "games",
+					Label:       "Games forum",
+					Description: "The main Games forum thread list.",
+					URL:         f95zone.PresetListURL("games", 1),
+				},
+			},
+			Capabilities: domain.AdapterBrowseCapabilities{
+				CustomURL:  true,
+				Pagination: true,
+				Search:     false,
+				Filter:     true,
+				Sort:       false,
+				Import:     true,
+				SearchNote: "F95zone list search is not enabled yet; XenForo search requires a separate adapter flow.",
+				FilterNote: "F95zone browse supports source-provided prefix filters from the current list page.",
+				SortNote:   "F95zone list sorting is not enabled yet.",
+			},
+		},
+	}
 }
 
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
@@ -1248,6 +1356,16 @@ type retryMediaRequest struct {
 	OriginalURL string `json:"original_url"`
 }
 
+type browseAdapterRequest struct {
+	PresetID  string `json:"preset_id"`
+	URL       string `json:"url"`
+	FilterURL string `json:"filter_url"`
+	Page      int    `json:"page"`
+	Search    string `json:"search"`
+	Sort      string `json:"sort"`
+	ProxyURL  string `json:"proxy_url"`
+}
+
 type importAuthProfileRequest struct {
 	AdapterID    string                     `json:"adapter_id"`
 	Domain       string                     `json:"domain"`
@@ -1266,6 +1384,49 @@ type authProfileCookieRequest struct {
 	Session   bool   `json:"session"`
 	Secure    bool   `json:"secure"`
 	HTTPOnly  bool   `json:"http_only"`
+}
+
+func (s *Server) browseF95zone(ctx context.Context, req browseAdapterRequest, capabilities domain.AdapterBrowseCapabilities) (domain.AdapterBrowsePage, error) {
+	rawURL := strings.TrimSpace(req.FilterURL)
+	if rawURL == "" {
+		rawURL = strings.TrimSpace(req.URL)
+	}
+	if rawURL == "" {
+		rawURL = f95zone.PresetListURL(firstNonEmpty(req.PresetID, "trending"), maxInt(req.Page, 1))
+	} else if req.Page > 0 {
+		rawURL = f95zone.ListURLWithPage(rawURL, req.Page)
+	}
+	if err := validateF95zoneURL(rawURL); err != nil {
+		return domain.AdapterBrowsePage{}, err
+	}
+	authProfile, err := s.authProfileForURL(ctx, "f95zone", rawURL)
+	if err != nil {
+		return domain.AdapterBrowsePage{}, err
+	}
+	body, err := fetchURL(ctx, rawURL, strings.TrimSpace(req.ProxyURL), authProfile)
+	if err != nil {
+		return domain.AdapterBrowsePage{}, err
+	}
+	page, err := f95zone.ParseBrowsePage(rawURL, bytes.NewReader(body))
+	if err != nil {
+		return domain.AdapterBrowsePage{}, err
+	}
+	page.Capabilities = capabilities
+	return page, nil
+}
+
+func validateF95zoneURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return errors.New("F95zone browse URL must be http or https")
+	}
+	if normalizeAuthDomain(parsed.Hostname()) != "f95zone.to" {
+		return errors.New("F95zone browse URL must be on f95zone.to")
+	}
+	return nil
 }
 
 func fetchURL(ctx context.Context, rawURL string, proxyURL string, authProfile *domain.AuthProfile) ([]byte, error) {

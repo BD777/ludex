@@ -26,6 +26,86 @@ type Source = {
   updated_at: string;
 };
 
+type AdapterBrowseCapabilities = {
+  custom_url: boolean;
+  pagination: boolean;
+  search: boolean;
+  filter: boolean;
+  sort: boolean;
+  import: boolean;
+  search_note: string;
+  filter_note: string;
+  sort_note: string;
+};
+
+type AdapterBrowsePreset = {
+  id: string;
+  label: string;
+  description: string;
+  url: string;
+};
+
+type AdapterBrowseManifest = {
+  enabled: boolean;
+  description: string;
+  presets: AdapterBrowsePreset[];
+  capabilities: AdapterBrowseCapabilities;
+};
+
+type Adapter = {
+  id: string;
+  name: string;
+  kind: string;
+  status: string;
+  input: string;
+  dedupe: string;
+  endpoint: string;
+  attachments: string;
+  auth_domain: string;
+  auth_cookie_names: string[];
+  without_bridge: string;
+  browse: AdapterBrowseManifest;
+};
+
+type AdapterBrowseFilter = {
+  id: string;
+  label: string;
+  count: string;
+  url: string;
+};
+
+type AdapterListItem = {
+  adapter_id: string;
+  external_id: string;
+  title: string;
+  url: string;
+  author: string;
+  started_at: string;
+  latest_at: string;
+  latest_by: string;
+  prefixes: string[];
+  tags: string[];
+  replies: string;
+  views: string;
+  rating: string;
+  votes: string;
+  importable: boolean;
+};
+
+type AdapterBrowsePage = {
+  adapter_id: string;
+  title: string;
+  url: string;
+  page: number;
+  total_pages: number;
+  prev_url: string;
+  next_url: string;
+  items: AdapterListItem[];
+  filters: AdapterBrowseFilter[];
+  warnings: string[];
+  capabilities: AdapterBrowseCapabilities;
+};
+
 type AuthProfile = {
   id: number;
   adapter_id: string;
@@ -196,6 +276,7 @@ const notice = ref("");
 const query = ref("");
 
 const games = ref<Game[]>([]);
+const adapters = ref<Adapter[]>([]);
 const sources = ref<Source[]>([]);
 const authProfiles = ref<AuthProfile[]>([]);
 const sourceItems = ref<SourceItem[]>([]);
@@ -237,6 +318,17 @@ const importDraftDefaults = {
 
 const importDraft = reactive({ ...importDraftDefaults });
 const selectedAdapterId = ref("f95zone");
+const adapterBrowseDraft = reactive({
+  preset_id: "trending",
+  url: "",
+  filter_url: "",
+  page: 1,
+  search: "",
+  sort: "",
+  proxy_url: ""
+});
+const adapterBrowsePage = ref<AdapterBrowsePage | null>(null);
+const adapterBrowsing = ref(false);
 
 const browserBridge = {
   name: "Ludex Browser Bridge",
@@ -250,23 +342,50 @@ const browserBridge = {
   limitation: "Chrome/Edge local extensions cannot be one-click installed from a web page"
 };
 
-const builtInAdapters = [
+const fallbackAdapters: Adapter[] = [
   {
     id: "f95zone",
     name: "F95zone",
     kind: "Forum thread",
     status: "built-in",
-    input: "Thread URL / raw HTML",
+    input: "Thread URL",
     dedupe: "Thread ID",
     endpoint: "/api/import/f95zone",
     attachments: "Cached images",
-    authDomain: "f95zone.to",
-    authCookieNames: ["xf_user"],
-    withoutBridge: "Download links, login-only spoilers/changelog, and some developer/social links may be unavailable."
+    auth_domain: "f95zone.to",
+    auth_cookie_names: ["xf_user"],
+    without_bridge: "Download links, login-only spoilers/changelog, and some developer/social links may be unavailable.",
+    browse: {
+      enabled: true,
+      description: "Browse XenForo thread lists and import selected F95zone game threads.",
+      presets: [
+        {
+          id: "trending",
+          label: "Trending games",
+          description: "F95zone trending game threads.",
+          url: "https://f95zone.to/trending/threads.1/"
+        },
+        {
+          id: "games",
+          label: "Games forum",
+          description: "The main Games forum thread list.",
+          url: "https://f95zone.to/forums/games.2/"
+        }
+      ],
+      capabilities: {
+        custom_url: true,
+        pagination: true,
+        search: false,
+        filter: true,
+        sort: false,
+        import: true,
+        search_note: "F95zone list search is not enabled yet; XenForo search requires a separate adapter flow.",
+        filter_note: "F95zone browse supports source-provided prefix filters from the current list page.",
+        sort_note: "F95zone list sorting is not enabled yet."
+      }
+    }
   }
-] as const;
-
-type BuiltInAdapter = (typeof builtInAdapters)[number];
+];
 
 const matchGameId = ref("");
 
@@ -371,16 +490,45 @@ const recentImportImages = computed(() => {
   return recentImportMediaEntries.value.filter((entry) => entry.status === "cached").map((entry) => entry.public_url);
 });
 
+const availableAdapters = computed(() => (adapters.value.length ? adapters.value : fallbackAdapters));
+
 const selectedAdapter = computed(() => {
-  return builtInAdapters.find((adapter) => adapter.id === selectedAdapterId.value) ?? builtInAdapters[0];
+  return availableAdapters.value.find((adapter) => adapter.id === selectedAdapterId.value) ?? fallbackAdapters[0];
 });
 
 const selectedAdapterAuthProfile = computed(() => {
   return (
     authProfiles.value.find(
-      (profile) => profile.adapter_id === selectedAdapter.value.id && profile.domain === selectedAdapter.value.authDomain
+      (profile) => profile.adapter_id === selectedAdapter.value.id && profile.domain === selectedAdapter.value.auth_domain
     ) ?? null
   );
+});
+
+const adapterBrowseCapabilities = computed(() => selectedAdapter.value.browse.capabilities);
+
+const adapterBrowsePresets = computed(() => selectedAdapter.value.browse.presets ?? []);
+
+const adapterBrowseFilters = computed(() => adapterBrowsePage.value?.filters ?? []);
+
+const filteredAdapterBrowseItems = computed(() => {
+  const items = adapterBrowsePage.value?.items ?? [];
+  const needle = adapterBrowseDraft.search.trim().toLowerCase();
+  if (!needle) {
+    return items;
+  }
+  return items.filter((item) => {
+    const haystack = [
+      item.title,
+      item.author,
+      item.latest_by,
+      item.external_id,
+      ...(item.prefixes ?? []),
+      ...(item.tags ?? [])
+    ]
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(needle);
+  });
 });
 
 const syncedAuthProfiles = computed(() => {
@@ -487,12 +635,14 @@ async function loadAll() {
 }
 
 async function loadLibrary() {
-  const [nextGames, nextSources, nextAuthProfiles, nextItems] = await Promise.all([
+  const [nextAdapters, nextGames, nextSources, nextAuthProfiles, nextItems] = await Promise.all([
+    api<Adapter[]>("/api/adapters"),
     api<Game[]>("/api/games"),
     api<Source[]>("/api/sources"),
     api<AuthProfile[]>("/api/auth-profiles"),
     api<SourceItem[]>("/api/source-items")
   ]);
+  adapters.value = nextAdapters.length ? nextAdapters : fallbackAdapters;
   games.value = nextGames;
   sources.value = nextSources;
   authProfiles.value = nextAuthProfiles;
@@ -630,11 +780,15 @@ async function saveGame() {
 }
 
 async function runImport() {
+  await queueF95zoneImport(importDraft.url.trim());
+}
+
+async function queueF95zoneImport(url: string) {
   error.value = "";
   clearNotice();
   loading.value = true;
   const payload = {
-    url: importDraft.url.trim(),
+    url,
     proxy_url: importDraft.proxy_url.trim(),
     create_game: importDraft.create_game
   };
@@ -653,6 +807,94 @@ async function runImport() {
   } finally {
     loading.value = false;
   }
+}
+
+async function browseAdapterList() {
+  if (!selectedAdapter.value.browse.enabled) {
+    return;
+  }
+  error.value = "";
+  clearNotice();
+  adapterBrowsing.value = true;
+  try {
+    const page = await api<AdapterBrowsePage>(`/api/adapters/${selectedAdapter.value.id}/browse`, {
+      method: "POST",
+      body: JSON.stringify({
+        preset_id: adapterBrowseDraft.preset_id,
+        url: adapterBrowseDraft.url.trim(),
+        filter_url: adapterBrowseDraft.filter_url.trim(),
+        page: adapterBrowseDraft.page,
+        search: "",
+        sort: adapterBrowseDraft.sort,
+        proxy_url: adapterBrowseDraft.proxy_url.trim() || importDraft.proxy_url.trim()
+      })
+    });
+    adapterBrowsePage.value = page;
+    adapterBrowseDraft.page = page.page || adapterBrowseDraft.page || 1;
+    adapterBrowseDraft.url = page.url;
+    showNotice("Adapter list loaded");
+  } catch (err) {
+    error.value = toMessage(err);
+  } finally {
+    adapterBrowsing.value = false;
+  }
+}
+
+function selectBrowsePreset(presetID: string) {
+  adapterBrowseDraft.preset_id = presetID;
+  adapterBrowseDraft.url = "";
+  adapterBrowseDraft.filter_url = "";
+  adapterBrowseDraft.page = 1;
+  adapterBrowseDraft.search = "";
+  adapterBrowsePage.value = null;
+}
+
+function resetAdapterBrowse() {
+  const firstPreset = selectedAdapter.value.browse.presets?.[0];
+  adapterBrowseDraft.preset_id = firstPreset?.id ?? "";
+  adapterBrowseDraft.url = "";
+  adapterBrowseDraft.filter_url = "";
+  adapterBrowseDraft.page = 1;
+  adapterBrowseDraft.search = "";
+  adapterBrowseDraft.sort = "";
+  adapterBrowseDraft.proxy_url = "";
+  adapterBrowsePage.value = null;
+}
+
+function selectBrowseFilter(filterURL: string) {
+  adapterBrowseDraft.filter_url = filterURL;
+  if (!filterURL) {
+    adapterBrowseDraft.url = "";
+  }
+  adapterBrowseDraft.page = 1;
+  adapterBrowseDraft.search = "";
+  void browseAdapterList();
+}
+
+function selectBrowseFilterFromEvent(event: Event) {
+  const target = event.target;
+  if (target instanceof HTMLSelectElement) {
+    selectBrowseFilter(target.value);
+  }
+}
+
+async function goBrowsePage(direction: 1 | -1) {
+  const targetURL = direction > 0 ? adapterBrowsePage.value?.next_url : adapterBrowsePage.value?.prev_url;
+  if (!targetURL) {
+    return;
+  }
+  adapterBrowseDraft.url = targetURL;
+  adapterBrowseDraft.filter_url = "";
+  adapterBrowseDraft.page = Math.max(1, (adapterBrowsePage.value?.page ?? adapterBrowseDraft.page) + direction);
+  await browseAdapterList();
+}
+
+async function importBrowseItem(item: AdapterListItem) {
+  if (!item.importable || !item.url) {
+    return;
+  }
+  importDraft.url = item.url;
+  await queueF95zoneImport(item.url);
 }
 
 async function createGameFromItem(item: SourceItem) {
@@ -1044,7 +1286,7 @@ function formatTimestamp(value?: string, fallback = "Never") {
 }
 
 function adapterName(adapterID: string) {
-  return builtInAdapters.find((adapter) => adapter.id === adapterID)?.name ?? adapterID;
+  return availableAdapters.value.find((adapter) => adapter.id === adapterID)?.name ?? adapterID;
 }
 
 function formatAuthExpiry(profile?: AuthProfile | null) {
@@ -1075,11 +1317,11 @@ function formatCookieFlags(cookie: AuthCookie) {
   return flags.join(" · ");
 }
 
-function hasAdapterAuth(profile: AuthProfile | null | undefined, adapter: BuiltInAdapter) {
+function hasAdapterAuth(profile: AuthProfile | null | undefined, adapter: Adapter) {
   if (!profile) {
     return false;
   }
-  const requiredCookies: readonly string[] = adapter.authCookieNames ?? [];
+  const requiredCookies: readonly string[] = adapter.auth_cookie_names ?? [];
   if (requiredCookies.length === 0) {
     return profile.cookie_count > 0;
   }
@@ -1087,8 +1329,8 @@ function hasAdapterAuth(profile: AuthProfile | null | undefined, adapter: BuiltI
   return requiredCookies.some((name) => names.has(name));
 }
 
-function missingAdapterAuthCookies(profile: AuthProfile | null | undefined, adapter: BuiltInAdapter) {
-  const requiredCookies: readonly string[] = adapter.authCookieNames ?? [];
+function missingAdapterAuthCookies(profile: AuthProfile | null | undefined, adapter: Adapter) {
+  const requiredCookies: readonly string[] = adapter.auth_cookie_names ?? [];
   if (!profile || requiredCookies.length === 0) {
     return [];
   }
@@ -1096,21 +1338,21 @@ function missingAdapterAuthCookies(profile: AuthProfile | null | undefined, adap
   return requiredCookies.filter((name) => !names.has(name));
 }
 
-function adapterAuthState(profile: AuthProfile | null | undefined, adapter: BuiltInAdapter) {
+function adapterAuthState(profile: AuthProfile | null | undefined, adapter: Adapter) {
   if (!profile) {
     return "missing";
   }
   return hasAdapterAuth(profile, adapter) ? "authorized" : "incomplete";
 }
 
-function adapterAuthStatusClass(profile: AuthProfile | null | undefined, adapter: BuiltInAdapter) {
+function adapterAuthStatusClass(profile: AuthProfile | null | undefined, adapter: Adapter) {
   const state = adapterAuthState(profile, adapter);
   if (state === "authorized") return "succeeded";
   if (state === "incomplete") return "warning";
   return "failed";
 }
 
-function adapterAuthStatusLabel(profile: AuthProfile | null | undefined, adapter: BuiltInAdapter) {
+function adapterAuthStatusLabel(profile: AuthProfile | null | undefined, adapter: Adapter) {
   return adapterAuthState(profile, adapter);
 }
 
@@ -1198,6 +1440,21 @@ function toMessage(err: unknown) {
 let taskPoll: number | undefined;
 
 watch(importDraft, persistImportDraft, { deep: true });
+
+watch(selectedAdapterId, resetAdapterBrowse);
+
+watch(
+  () => adapterBrowseDraft.preset_id,
+  (next, previous) => {
+    if (next !== previous) {
+      adapterBrowseDraft.url = "";
+      adapterBrowseDraft.filter_url = "";
+      adapterBrowseDraft.page = 1;
+      adapterBrowseDraft.search = "";
+      adapterBrowsePage.value = null;
+    }
+  }
+);
 
 watch(error, (message) => {
   if (errorTimer !== undefined) {
@@ -1625,7 +1882,7 @@ onUnmounted(() => {
               <h1>Adapters</h1>
             </div>
             <button
-              v-for="adapter in builtInAdapters"
+              v-for="adapter in availableAdapters"
               :key="adapter.id"
               class="row-button"
               :class="{ selected: selectedAdapterId === adapter.id }"
@@ -1669,7 +1926,7 @@ onUnmounted(() => {
               </div>
               <div class="wide">
                 <span>Without Browser Bridge</span>
-                <strong>{{ selectedAdapter.withoutBridge }}</strong>
+                <strong>{{ selectedAdapter.without_bridge }}</strong>
               </div>
             </dl>
           </div>
@@ -1738,6 +1995,133 @@ onUnmounted(() => {
                   <Icon name="download" :size="17" />
                   <span>Download extension</span>
                 </a>
+              </div>
+            </div>
+
+            <div class="detail-pane adapter-browser-pane">
+              <div class="pane-title">
+                <h2>Browse Source List</h2>
+                <div class="button-row">
+                  <button class="secondary" :disabled="adapterBrowsing || !selectedAdapter.browse.enabled" @click="browseAdapterList">
+                    <Icon name="refresh" :size="17" />
+                    <span>{{ adapterBrowsing ? "Loading" : "Load" }}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="adapter-browser-controls">
+                <label>
+                  <span>Preset</span>
+                  <select v-model="adapterBrowseDraft.preset_id" :disabled="!adapterBrowsePresets.length" @change="selectBrowsePreset(adapterBrowseDraft.preset_id)">
+                    <option v-for="preset in adapterBrowsePresets" :key="preset.id" :value="preset.id">
+                      {{ preset.label }}
+                    </option>
+                  </select>
+                </label>
+                <label>
+                  <span>Page</span>
+                  <input
+                    v-model.number="adapterBrowseDraft.page"
+                    type="number"
+                    min="1"
+                    :disabled="!adapterBrowseCapabilities.pagination"
+                    @keydown.enter.prevent="browseAdapterList"
+                  />
+                </label>
+                <label>
+                  <span>Loaded-page search</span>
+                  <input v-model="adapterBrowseDraft.search" type="search" placeholder="Keyword, tag, author" />
+                </label>
+                <label>
+                  <span>Source filter</span>
+                  <select
+                    :value="adapterBrowseDraft.filter_url"
+                    :disabled="!adapterBrowseCapabilities.filter || adapterBrowseFilters.length === 0"
+                    @change="selectBrowseFilterFromEvent"
+                  >
+                    <option value="">None</option>
+                    <option v-for="filter in adapterBrowseFilters" :key="filter.id" :value="filter.url">
+                      {{ filter.label }}{{ filter.count ? ` (${filter.count})` : "" }}
+                    </option>
+                  </select>
+                </label>
+                <label>
+                  <span>Source search</span>
+                  <input type="search" :disabled="!adapterBrowseCapabilities.search" :placeholder="adapterBrowseCapabilities.search ? 'Search source' : 'Disabled for this adapter'" />
+                </label>
+                <label>
+                  <span>Sort by</span>
+                  <select v-model="adapterBrowseDraft.sort" :disabled="!adapterBrowseCapabilities.sort">
+                    <option value="">Source default</option>
+                  </select>
+                </label>
+                <label class="wide">
+                  <span>List URL</span>
+                  <input v-model="adapterBrowseDraft.url" type="url" :disabled="!adapterBrowseCapabilities.custom_url" placeholder="Use preset, source filter, or paste a list URL" />
+                </label>
+              </div>
+
+              <div class="capability-note-row">
+                <span v-if="!adapterBrowseCapabilities.search">{{ adapterBrowseCapabilities.search_note }}</span>
+                <span v-if="!adapterBrowseCapabilities.sort">{{ adapterBrowseCapabilities.sort_note }}</span>
+              </div>
+
+              <div v-if="adapterBrowsePage" class="adapter-browser-summary">
+                <div>
+                  <strong>{{ adapterBrowsePage.title || selectedAdapter.name }}</strong>
+                  <small>Page {{ adapterBrowsePage.page }}{{ adapterBrowsePage.total_pages ? ` / ${adapterBrowsePage.total_pages}` : "" }} · {{ filteredAdapterBrowseItems.length }} shown</small>
+                </div>
+                <div class="button-row">
+                  <button class="secondary" :disabled="!adapterBrowsePage.prev_url || adapterBrowsing" @click="goBrowsePage(-1)">
+                    <Icon name="arrow-left" :size="17" />
+                    <span>Prev</span>
+                  </button>
+                  <button class="secondary" :disabled="!adapterBrowsePage.next_url || adapterBrowsing" @click="goBrowsePage(1)">
+                    <span>Next</span>
+                    <Icon name="arrow-right" :size="17" />
+                  </button>
+                </div>
+              </div>
+
+              <div v-if="adapterBrowsePage?.warnings?.length" class="warning-box">
+                <p v-for="warning in adapterBrowsePage.warnings" :key="warning">{{ warning }}</p>
+              </div>
+
+              <div v-if="adapterBrowsePage" class="adapter-result-list">
+                <div v-for="item in filteredAdapterBrowseItems" :key="item.url" class="adapter-result-row">
+                  <div class="row-main">
+                    <strong>{{ item.title }}</strong>
+                    <small>
+                      {{ item.author || "Unknown author" }}
+                      <template v-if="item.latest_at"> · updated {{ formatTimestamp(item.latest_at, item.latest_at) }}</template>
+                    </small>
+                    <div v-if="item.prefixes?.length" class="tag-row">
+                      <span v-for="tag in item.prefixes" :key="`${item.url}-${tag}`">{{ tag }}</span>
+                    </div>
+                    <small class="adapter-result-stats">
+                      ID {{ item.external_id || "Unknown" }}
+                      <template v-if="item.replies"> · {{ item.replies }} replies</template>
+                      <template v-if="item.views"> · {{ item.views }} views</template>
+                      <template v-if="item.rating"> · {{ item.rating }}★</template>
+                    </small>
+                  </div>
+                  <div class="row-actions">
+                    <a class="secondary" :href="item.url" target="_blank" rel="noreferrer">
+                      <Icon name="external-link" :size="16" />
+                      <span>Open</span>
+                    </a>
+                    <button class="primary" :disabled="!adapterBrowseCapabilities.import || !item.importable || loading" @click="importBrowseItem(item)">
+                      <Icon name="download" :size="16" />
+                      <span>Import</span>
+                    </button>
+                  </div>
+                </div>
+                <div v-if="filteredAdapterBrowseItems.length === 0" class="empty-detail">
+                  <strong>No rows match the loaded-page filter</strong>
+                </div>
+              </div>
+              <div v-else class="empty-detail">
+                <strong>Load a source list to browse import candidates</strong>
               </div>
             </div>
           </div>
