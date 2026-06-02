@@ -30,9 +30,6 @@ import (
 	"local/ludex/internal/storage"
 )
 
-//go:embed userscripts/ludex.user.js
-var ludexUserscript string
-
 //go:embed extensions/ludex-browser-bridge/*
 var extensionFiles embed.FS
 
@@ -59,10 +56,6 @@ func New(store *storage.Store) http.Handler {
 	r := chi.NewRouter()
 
 	r.Get("/api/health", server.health)
-	r.Get("/userscripts/ludex.user.js", server.serveLudexUserscript)
-	r.Head("/userscripts/ludex.user.js", server.serveLudexUserscript)
-	r.Get("/userscripts/f95zone.user.js", server.serveLudexUserscript)
-	r.Head("/userscripts/f95zone.user.js", server.serveLudexUserscript)
 	r.Get("/extensions/ludex-browser-bridge.zip", server.serveBrowserExtensionZip)
 	r.Head("/extensions/ludex-browser-bridge.zip", server.serveBrowserExtensionZip)
 	r.Get("/api/tasks", server.listTasks)
@@ -101,14 +94,6 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		"ok":      true,
 		"dataDir": s.store.DataDir(),
 	})
-}
-
-func (s *Server) serveLudexUserscript(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Content-Disposition", `inline; filename="ludex.user.js"`)
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_, _ = io.WriteString(w, ludexUserscript)
 }
 
 func (s *Server) serveBrowserExtensionZip(w http.ResponseWriter, r *http.Request) {

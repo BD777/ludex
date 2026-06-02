@@ -30,18 +30,16 @@ Open the Vite URL, usually `http://localhost:5173`.
 
 ## Browser Bridge
 
-Ludex ships browser bridge helpers for syncing supported source auth profiles
-into the local service.
+Ludex ships a Chromium/Edge browser extension for syncing supported source auth
+profiles into the local service.
 
-- Install from the Ludex `Adapters` page with `Install userscript`.
-- Direct URL: `http://127.0.0.1:8787/userscripts/ludex.user.js`
-- Use the Tampermonkey menu command on a supported source page to sync readable
-  cookies and User-Agent into Ludex.
+- Download from the Ludex `Adapters` page with `Extension ZIP`.
+- Direct URL: `http://127.0.0.1:8787/extensions/ludex-browser-bridge.zip`
+- The extension uses `chrome.cookies` so it can read HttpOnly cookies such as
+  F95zone `xf_user` and `xf_session`.
 - Cookie values are persisted locally but are not returned by the status API.
   Username and cookie metadata such as names and expiry are exposed for status.
-- For HttpOnly cookies such as F95zone `xf_user`, use the Chromium extension
-  package from `http://127.0.0.1:8787/extensions/ludex-browser-bridge.zip`.
-  Chrome and Edge require local extensions to be loaded manually through
+- Chrome and Edge require local extensions to be loaded manually through
   Developer mode / Load unpacked unless the extension is published through the
   browser's extension store.
 

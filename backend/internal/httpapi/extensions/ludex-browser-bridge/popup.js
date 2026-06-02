@@ -12,7 +12,8 @@ button.addEventListener("click", async () => {
     }
     const profile = response.result;
     const account = profile.username ? ` as ${profile.username}` : "";
-    statusEl.textContent = `Synced ${profile.cookie_count} cookies${account}.`;
+    const names = Array.isArray(profile.cookies) ? profile.cookies.map((cookie) => cookie.name).join(", ") : "";
+    statusEl.textContent = `Synced ${profile.cookie_count} cookies${account}${names ? `: ${names}` : ""}.`;
   } catch (err) {
     statusEl.className = "error";
     statusEl.textContent = err && err.message ? err.message : "Sync failed";
