@@ -215,7 +215,8 @@ const builtInAdapters = [
     input: "Thread URL / raw HTML",
     dedupe: "Thread ID",
     endpoint: "/api/import/f95zone",
-    attachments: "Cached images"
+    attachments: "Cached images",
+    userscript: "/userscripts/f95zone.user.js"
   }
 ] as const;
 
@@ -1099,7 +1100,13 @@ onUnmounted(() => {
         <div class="detail-pane">
           <div class="pane-title">
             <h2>{{ selectedAdapter.name }}</h2>
-            <span class="status-pill succeeded">{{ selectedAdapter.status }}</span>
+            <div class="button-row">
+              <a class="primary" :href="selectedAdapter.userscript" target="_blank" rel="noreferrer">
+                <Icon name="download" :size="17" />
+                <span>Install userscript</span>
+              </a>
+              <span class="status-pill succeeded">{{ selectedAdapter.status }}</span>
+            </div>
           </div>
           <dl class="meta-grid">
             <div>
@@ -1121,6 +1128,10 @@ onUnmounted(() => {
             <div>
               <span>Endpoint</span>
               <strong>{{ selectedAdapter.endpoint }}</strong>
+            </div>
+            <div>
+              <span>Userscript</span>
+              <strong>{{ selectedAdapter.userscript }}</strong>
             </div>
           </dl>
         </div>

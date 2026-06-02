@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,9 @@ import (
 	"local/ludex/internal/source/f95zone"
 	"local/ludex/internal/storage"
 )
+
+//go:embed userscripts/f95zone.user.js
+var f95zoneUserscript string
 
 type Server struct {
 	store *storage.Store
@@ -50,6 +54,8 @@ func New(store *storage.Store) http.Handler {
 	r := chi.NewRouter()
 
 	r.Get("/api/health", server.health)
+	r.Get("/userscripts/f95zone.user.js", server.serveF95zoneUserscript)
+	r.Head("/userscripts/f95zone.user.js", server.serveF95zoneUserscript)
 	r.Get("/api/tasks", server.listTasks)
 	r.Get("/api/tasks/{taskID}", server.getTask)
 
@@ -84,6 +90,14 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		"ok":      true,
 		"dataDir": s.store.DataDir(),
 	})
+}
+
+func (s *Server) serveF95zoneUserscript(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Disposition", `inline; filename="ludex-f95zone.user.js"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = io.WriteString(w, f95zoneUserscript)
 }
 
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
@@ -1323,7 +1337,7 @@ func structToMap(value any) (map[string]any, error) {
 
 func decodeJSON(r *http.Request, target any) error {
 	defer r.Body.Close()
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 4<<20))
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 16<<20))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return err
