@@ -348,10 +348,26 @@ const recentImportTask = computed(() => {
   return lastImportTaskId.value ? tasks.value.find((task) => task.id === lastImportTaskId.value) ?? null : null;
 });
 
-const recentImportImages = computed(() => {
+const recentImportSourceItem = computed(() => {
   const result = recentImportTask.value?.result_json;
-  const transcript = result?.transcript ?? result?.item?.parsed_json;
-  return transcriptImageList(transcript);
+  const itemID = result?.item?.id;
+  if (!itemID) {
+    return null;
+  }
+  return sourceItems.value.find((item) => item.id === itemID) ?? result.item ?? null;
+});
+
+const recentImportTranscript = computed(() => {
+  const result = recentImportTask.value?.result_json;
+  return recentImportSourceItem.value?.parsed_json ?? result?.transcript ?? result?.item?.parsed_json ?? {};
+});
+
+const recentImportMediaEntries = computed(() => {
+  return transcriptImageEntries(recentImportTranscript.value);
+});
+
+const recentImportImages = computed(() => {
+  return recentImportMediaEntries.value.filter((entry) => entry.status === "cached").map((entry) => entry.public_url);
 });
 
 const selectedAdapter = computed(() => {
@@ -1739,16 +1755,33 @@ onUnmounted(() => {
               </div>
               <strong>{{ taskProgress(recentImportTask) }}%</strong>
             </div>
-            <div v-if="recentImportImages.length" class="image-strip compact">
-              <button
-                v-for="image in recentImportImages"
-                :key="image"
-                class="image-thumb"
-                type="button"
-                @click="openImagePreview(image, recentImportImages)"
+            <div v-if="recentImportMediaEntries.length" class="image-strip compact">
+              <div
+                v-for="entry in recentImportMediaEntries"
+                :key="entry.key"
+                class="image-card"
+                :class="{ failed: entry.status === 'failed' }"
               >
-                <img :src="image" alt="" draggable="false" @dragstart.prevent />
-              </button>
+                <button
+                  v-if="entry.status === 'cached'"
+                  class="image-thumb"
+                  type="button"
+                  @click="openImagePreview(entry.public_url, recentImportImages)"
+                >
+                  <img :src="entry.public_url" alt="" draggable="false" @dragstart.prevent />
+                </button>
+                <button
+                  v-else
+                  class="image-thumb image-placeholder"
+                  type="button"
+                  :disabled="!recentImportSourceItem || retryingMediaURL === entry.original_url"
+                  @click="recentImportSourceItem && retryItemImage(recentImportSourceItem, entry)"
+                >
+                  <Icon name="refresh" :size="18" />
+                  <strong>{{ entry.role === "cover" ? "Cover failed" : "Image failed" }}</strong>
+                  <small>{{ retryingMediaURL === entry.original_url ? "Retrying" : "Retry" }}</small>
+                </button>
+              </div>
             </div>
             <div class="result-actions">
               <strong v-if="taskResultTitle(recentImportTask)" class="result-title">
