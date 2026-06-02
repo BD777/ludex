@@ -79,6 +79,8 @@ type AdapterListItem = {
   external_id: string;
   title: string;
   url: string;
+  preview_url: string;
+  cover_image: string;
   author: string;
   started_at: string;
   latest_at: string;
@@ -161,6 +163,14 @@ type Task = {
     item?: SourceItem;
     game?: Game;
     transcript?: Transcript;
+    import_request?: {
+      source_id?: number;
+      url?: string;
+      proxy_url?: string;
+      create_game?: boolean;
+      has_html?: boolean;
+    };
+    retried_by_task_id?: number;
   };
   error: string;
   created_at: string;
@@ -251,6 +261,8 @@ type TranscriptFields = {
 
 type ViewName = "games" | "adapters" | "import" | "items" | "tasks";
 
+type ImportMode = "browse" | "direct";
+
 type GamePanelMode = "detail" | "edit" | "new";
 
 type DeleteTarget =
@@ -274,6 +286,7 @@ const loading = ref(false);
 const error = ref("");
 const notice = ref("");
 const query = ref("");
+const importMode = ref<ImportMode>("browse");
 
 const games = ref<Game[]>([]);
 const adapters = ref<Adapter[]>([]);
@@ -295,11 +308,14 @@ const taskHistoryExpanded = ref(false);
 const matchEditing = ref(false);
 const mediaRetrying = ref(false);
 const retryingMediaURL = ref("");
+const retryingTaskId = ref<number | null>(null);
 let noticeTimer: number | undefined;
 let errorTimer: number | undefined;
 
 const importDraftStorageKey = "gmb.importDraft.v1";
+const adapterBrowseStorageKey = "gmb.adapterBrowse.v1";
 const lastImportTaskStorageKey = "gmb.lastImportTaskId.v1";
+let restoringAdapterBrowseState = false;
 
 const gameDraft = reactive({
   id: 0,
@@ -318,15 +334,17 @@ const importDraftDefaults = {
 
 const importDraft = reactive({ ...importDraftDefaults });
 const selectedAdapterId = ref("f95zone");
-const adapterBrowseDraft = reactive({
+
+const adapterBrowseDraftDefaults = {
   preset_id: "trending",
   url: "",
   filter_url: "",
   page: 1,
-  search: "",
   sort: "",
   proxy_url: ""
-});
+};
+
+const adapterBrowseDraft = reactive({ ...adapterBrowseDraftDefaults });
 const adapterBrowsePage = ref<AdapterBrowsePage | null>(null);
 const adapterBrowsing = ref(false);
 
@@ -462,7 +480,7 @@ const canStepPreview = computed(() => previewSequence.value.length > 1 && previe
 
 const activeTasks = computed(() => tasks.value.filter(isTaskActive));
 
-const completedTasks = computed(() => tasks.value.filter((task) => !isTaskActive(task)));
+const completedTasks = computed(() => tasks.value.filter((task) => !isTaskActive(task) && !isTaskRetried(task)));
 
 const recentImportTask = computed(() => {
   return lastImportTaskId.value ? tasks.value.find((task) => task.id === lastImportTaskId.value) ?? null : null;
@@ -509,27 +527,6 @@ const adapterBrowseCapabilities = computed(() => selectedAdapter.value.browse.ca
 const adapterBrowsePresets = computed(() => selectedAdapter.value.browse.presets ?? []);
 
 const adapterBrowseFilters = computed(() => adapterBrowsePage.value?.filters ?? []);
-
-const filteredAdapterBrowseItems = computed(() => {
-  const items = adapterBrowsePage.value?.items ?? [];
-  const needle = adapterBrowseDraft.search.trim().toLowerCase();
-  if (!needle) {
-    return items;
-  }
-  return items.filter((item) => {
-    const haystack = [
-      item.title,
-      item.author,
-      item.latest_by,
-      item.external_id,
-      ...(item.prefixes ?? []),
-      ...(item.tags ?? [])
-    ]
-      .join(" ")
-      .toLowerCase();
-    return haystack.includes(needle);
-  });
-});
 
 const syncedAuthProfiles = computed(() => {
   return authProfiles.value.filter((profile) => profile.cookie_count > 0);
@@ -809,6 +806,32 @@ async function queueF95zoneImport(url: string) {
   }
 }
 
+async function retryTask(task: Task) {
+  if (!canRetryTask(task)) {
+    return;
+  }
+  error.value = "";
+  clearNotice();
+  retryingTaskId.value = task.id;
+  try {
+    const result = await api<{ task: Task; duplicate?: boolean }>(`/api/tasks/${task.id}/retry`, {
+      method: "POST",
+      body: JSON.stringify({
+        proxy_url: importDraft.proxy_url.trim() || adapterBrowseDraft.proxy_url.trim()
+      })
+    });
+    showNotice(result.duplicate ? "Import task already running" : "Import retry started");
+    lastImportTaskId.value = result.task.id;
+    persistLastImportTaskId();
+    selectedTask.value = result.task;
+    await loadTasks();
+  } catch (err) {
+    error.value = toMessage(err);
+  } finally {
+    retryingTaskId.value = null;
+  }
+}
+
 async function browseAdapterList() {
   if (!selectedAdapter.value.browse.enabled) {
     return;
@@ -824,7 +847,6 @@ async function browseAdapterList() {
         url: adapterBrowseDraft.url.trim(),
         filter_url: adapterBrowseDraft.filter_url.trim(),
         page: adapterBrowseDraft.page,
-        search: "",
         sort: adapterBrowseDraft.sort,
         proxy_url: adapterBrowseDraft.proxy_url.trim() || importDraft.proxy_url.trim()
       })
@@ -845,7 +867,6 @@ function selectBrowsePreset(presetID: string) {
   adapterBrowseDraft.url = "";
   adapterBrowseDraft.filter_url = "";
   adapterBrowseDraft.page = 1;
-  adapterBrowseDraft.search = "";
   adapterBrowsePage.value = null;
 }
 
@@ -855,7 +876,6 @@ function resetAdapterBrowse() {
   adapterBrowseDraft.url = "";
   adapterBrowseDraft.filter_url = "";
   adapterBrowseDraft.page = 1;
-  adapterBrowseDraft.search = "";
   adapterBrowseDraft.sort = "";
   adapterBrowseDraft.proxy_url = "";
   adapterBrowsePage.value = null;
@@ -867,7 +887,6 @@ function selectBrowseFilter(filterURL: string) {
     adapterBrowseDraft.url = "";
   }
   adapterBrowseDraft.page = 1;
-  adapterBrowseDraft.search = "";
   void browseAdapterList();
 }
 
@@ -895,6 +914,25 @@ async function importBrowseItem(item: AdapterListItem) {
   }
   importDraft.url = item.url;
   await queueF95zoneImport(item.url);
+}
+
+function adapterBrowseCoverSrc(item: AdapterListItem) {
+  if (item.cover_image && !isExternalURL(item.cover_image)) {
+    return item.cover_image;
+  }
+  if (!item.preview_url || item.adapter_id !== "f95zone") {
+    return "";
+  }
+  const params = new URLSearchParams({ preview_url: item.preview_url });
+  const proxyURL = adapterBrowseDraft.proxy_url.trim() || importDraft.proxy_url.trim();
+  if (proxyURL) {
+    params.set("proxy_url", proxyURL);
+  }
+  return `/api/adapters/${item.adapter_id}/browse-cover?${params.toString()}`;
+}
+
+function isExternalURL(value: string) {
+  return /^https?:\/\//i.test(value);
 }
 
 async function createGameFromItem(item: SourceItem) {
@@ -1159,6 +1197,14 @@ function isTaskActive(task: Task) {
   return task.status === "queued" || task.status === "running";
 }
 
+function canRetryTask(task: Task) {
+  return task.status === "failed" && task.kind === "import:f95zone";
+}
+
+function isTaskRetried(task: Task) {
+  return Number.isFinite(task.result_json?.retried_by_task_id);
+}
+
 function taskProgress(task: Task) {
   if (task.progress_total <= 0) {
     return task.status === "succeeded" ? 100 : 0;
@@ -1364,6 +1410,11 @@ function clearImportState() {
   showNotice("Import cleared");
 }
 
+function dismissRecentImportTask() {
+  lastImportTaskId.value = null;
+  persistLastImportTaskId();
+}
+
 function showNotice(message: string) {
   notice.value = message;
   if (noticeTimer !== undefined) {
@@ -1405,6 +1456,42 @@ function restoreImportState() {
   }
 }
 
+function restoreAdapterBrowseState() {
+  const savedState = localStorage.getItem(adapterBrowseStorageKey);
+  if (!savedState) {
+    return;
+  }
+  restoringAdapterBrowseState = true;
+  try {
+    const state = JSON.parse(savedState) as {
+      selected_adapter_id?: unknown;
+      import_mode?: unknown;
+      draft?: Partial<typeof adapterBrowseDraftDefaults>;
+      page?: AdapterBrowsePage | null;
+    };
+    if (typeof state.selected_adapter_id === "string" && state.selected_adapter_id) {
+      selectedAdapterId.value = state.selected_adapter_id;
+    }
+    if (state.import_mode === "browse" || state.import_mode === "direct") {
+      importMode.value = state.import_mode;
+    }
+    const draft = state.draft ?? {};
+    Object.assign(adapterBrowseDraft, {
+      preset_id: typeof draft.preset_id === "string" ? draft.preset_id : adapterBrowseDraftDefaults.preset_id,
+      url: typeof draft.url === "string" ? draft.url : adapterBrowseDraftDefaults.url,
+      filter_url: typeof draft.filter_url === "string" ? draft.filter_url : adapterBrowseDraftDefaults.filter_url,
+      page: typeof draft.page === "number" && Number.isFinite(draft.page) ? draft.page : adapterBrowseDraftDefaults.page,
+      sort: typeof draft.sort === "string" ? draft.sort : adapterBrowseDraftDefaults.sort,
+      proxy_url: typeof draft.proxy_url === "string" ? draft.proxy_url : adapterBrowseDraftDefaults.proxy_url
+    });
+    adapterBrowsePage.value = state.page && Array.isArray(state.page.items) ? state.page : null;
+  } catch {
+    localStorage.removeItem(adapterBrowseStorageKey);
+  } finally {
+    restoringAdapterBrowseState = false;
+  }
+}
+
 function persistImportDraft() {
   try {
     if (isImportDraftEmpty()) {
@@ -1425,6 +1512,25 @@ function isImportDraftEmpty() {
   );
 }
 
+function persistAdapterBrowseState() {
+  if (restoringAdapterBrowseState) {
+    return;
+  }
+  try {
+    localStorage.setItem(
+      adapterBrowseStorageKey,
+      JSON.stringify({
+        selected_adapter_id: selectedAdapterId.value,
+        import_mode: importMode.value,
+        draft: adapterBrowseDraft,
+        page: adapterBrowsePage.value
+      })
+    );
+  } catch (err) {
+    error.value = `Could not save browse state: ${toMessage(err)}`;
+  }
+}
+
 function persistLastImportTaskId() {
   if (lastImportTaskId.value) {
     localStorage.setItem(lastImportTaskStorageKey, lastImportTaskId.value.toString());
@@ -1441,16 +1547,21 @@ let taskPoll: number | undefined;
 
 watch(importDraft, persistImportDraft, { deep: true });
 
-watch(selectedAdapterId, resetAdapterBrowse);
+watch(adapterBrowseDraft, persistAdapterBrowseState, { deep: true });
+
+watch(adapterBrowsePage, persistAdapterBrowseState, { deep: true });
+
+watch(selectedAdapterId, persistAdapterBrowseState);
+
+watch(importMode, persistAdapterBrowseState);
 
 watch(
   () => adapterBrowseDraft.preset_id,
   (next, previous) => {
-    if (next !== previous) {
+    if (!restoringAdapterBrowseState && next !== previous) {
       adapterBrowseDraft.url = "";
       adapterBrowseDraft.filter_url = "";
       adapterBrowseDraft.page = 1;
-      adapterBrowseDraft.search = "";
       adapterBrowsePage.value = null;
     }
   }
@@ -1473,6 +1584,7 @@ watch(error, (message) => {
 
 onMounted(() => {
   restoreImportState();
+  restoreAdapterBrowseState();
   void loadAll();
   window.addEventListener("keydown", handlePreviewKeydown);
   taskPoll = window.setInterval(() => {
@@ -1530,16 +1642,6 @@ onUnmounted(() => {
     </aside>
 
     <main class="main">
-      <header class="topbar">
-        <div class="searchbox">
-          <Icon name="search" :size="17" />
-          <input v-model="query" type="search" placeholder="Search games" />
-        </div>
-        <button class="icon-button" title="Refresh" @click="loadAll">
-          <Icon name="refresh" :size="18" />
-        </button>
-      </header>
-
       <section v-if="view === 'games'" class="workspace two-column">
         <div class="list-pane">
           <div class="pane-title">
@@ -1547,6 +1649,12 @@ onUnmounted(() => {
             <button class="icon-button" title="New game" @click="newGame">
               <Icon name="plus" :size="18" />
             </button>
+          </div>
+          <div class="list-filter-row">
+            <div class="searchbox">
+              <Icon name="search" :size="17" />
+              <input v-model="query" type="search" placeholder="Search games" />
+            </div>
           </div>
           <div
             v-for="game in filteredGames"
@@ -1998,140 +2106,257 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <div class="detail-pane adapter-browser-pane">
-              <div class="pane-title">
-                <h2>Browse Source List</h2>
-                <div class="button-row">
-                  <button class="secondary" :disabled="adapterBrowsing || !selectedAdapter.browse.enabled" @click="browseAdapterList">
-                    <Icon name="refresh" :size="17" />
-                    <span>{{ adapterBrowsing ? "Loading" : "Load" }}</span>
-                  </button>
-                </div>
-              </div>
-
-              <div class="adapter-browser-controls">
-                <label>
-                  <span>Preset</span>
-                  <select v-model="adapterBrowseDraft.preset_id" :disabled="!adapterBrowsePresets.length" @change="selectBrowsePreset(adapterBrowseDraft.preset_id)">
-                    <option v-for="preset in adapterBrowsePresets" :key="preset.id" :value="preset.id">
-                      {{ preset.label }}
-                    </option>
-                  </select>
-                </label>
-                <label>
-                  <span>Page</span>
-                  <input
-                    v-model.number="adapterBrowseDraft.page"
-                    type="number"
-                    min="1"
-                    :disabled="!adapterBrowseCapabilities.pagination"
-                    @keydown.enter.prevent="browseAdapterList"
-                  />
-                </label>
-                <label>
-                  <span>Loaded-page search</span>
-                  <input v-model="adapterBrowseDraft.search" type="search" placeholder="Keyword, tag, author" />
-                </label>
-                <label>
-                  <span>Source filter</span>
-                  <select
-                    :value="adapterBrowseDraft.filter_url"
-                    :disabled="!adapterBrowseCapabilities.filter || adapterBrowseFilters.length === 0"
-                    @change="selectBrowseFilterFromEvent"
-                  >
-                    <option value="">None</option>
-                    <option v-for="filter in adapterBrowseFilters" :key="filter.id" :value="filter.url">
-                      {{ filter.label }}{{ filter.count ? ` (${filter.count})` : "" }}
-                    </option>
-                  </select>
-                </label>
-                <label>
-                  <span>Source search</span>
-                  <input type="search" :disabled="!adapterBrowseCapabilities.search" :placeholder="adapterBrowseCapabilities.search ? 'Search source' : 'Disabled for this adapter'" />
-                </label>
-                <label>
-                  <span>Sort by</span>
-                  <select v-model="adapterBrowseDraft.sort" :disabled="!adapterBrowseCapabilities.sort">
-                    <option value="">Source default</option>
-                  </select>
-                </label>
-                <label class="wide">
-                  <span>List URL</span>
-                  <input v-model="adapterBrowseDraft.url" type="url" :disabled="!adapterBrowseCapabilities.custom_url" placeholder="Use preset, source filter, or paste a list URL" />
-                </label>
-              </div>
-
-              <div class="capability-note-row">
-                <span v-if="!adapterBrowseCapabilities.search">{{ adapterBrowseCapabilities.search_note }}</span>
-                <span v-if="!adapterBrowseCapabilities.sort">{{ adapterBrowseCapabilities.sort_note }}</span>
-              </div>
-
-              <div v-if="adapterBrowsePage" class="adapter-browser-summary">
-                <div>
-                  <strong>{{ adapterBrowsePage.title || selectedAdapter.name }}</strong>
-                  <small>Page {{ adapterBrowsePage.page }}{{ adapterBrowsePage.total_pages ? ` / ${adapterBrowsePage.total_pages}` : "" }} · {{ filteredAdapterBrowseItems.length }} shown</small>
-                </div>
-                <div class="button-row">
-                  <button class="secondary" :disabled="!adapterBrowsePage.prev_url || adapterBrowsing" @click="goBrowsePage(-1)">
-                    <Icon name="arrow-left" :size="17" />
-                    <span>Prev</span>
-                  </button>
-                  <button class="secondary" :disabled="!adapterBrowsePage.next_url || adapterBrowsing" @click="goBrowsePage(1)">
-                    <span>Next</span>
-                    <Icon name="arrow-right" :size="17" />
-                  </button>
-                </div>
-              </div>
-
-              <div v-if="adapterBrowsePage?.warnings?.length" class="warning-box">
-                <p v-for="warning in adapterBrowsePage.warnings" :key="warning">{{ warning }}</p>
-              </div>
-
-              <div v-if="adapterBrowsePage" class="adapter-result-list">
-                <div v-for="item in filteredAdapterBrowseItems" :key="item.url" class="adapter-result-row">
-                  <div class="row-main">
-                    <strong>{{ item.title }}</strong>
-                    <small>
-                      {{ item.author || "Unknown author" }}
-                      <template v-if="item.latest_at"> · updated {{ formatTimestamp(item.latest_at, item.latest_at) }}</template>
-                    </small>
-                    <div v-if="item.prefixes?.length" class="tag-row">
-                      <span v-for="tag in item.prefixes" :key="`${item.url}-${tag}`">{{ tag }}</span>
-                    </div>
-                    <small class="adapter-result-stats">
-                      ID {{ item.external_id || "Unknown" }}
-                      <template v-if="item.replies"> · {{ item.replies }} replies</template>
-                      <template v-if="item.views"> · {{ item.views }} views</template>
-                      <template v-if="item.rating"> · {{ item.rating }}★</template>
-                    </small>
-                  </div>
-                  <div class="row-actions">
-                    <a class="secondary" :href="item.url" target="_blank" rel="noreferrer">
-                      <Icon name="external-link" :size="16" />
-                      <span>Open</span>
-                    </a>
-                    <button class="primary" :disabled="!adapterBrowseCapabilities.import || !item.importable || loading" @click="importBrowseItem(item)">
-                      <Icon name="download" :size="16" />
-                      <span>Import</span>
-                    </button>
-                  </div>
-                </div>
-                <div v-if="filteredAdapterBrowseItems.length === 0" class="empty-detail">
-                  <strong>No rows match the loaded-page filter</strong>
-                </div>
-              </div>
-              <div v-else class="empty-detail">
-                <strong>Load a source list to browse import candidates</strong>
-              </div>
-            </div>
           </div>
         </div>
       </section>
 
-      <section v-else-if="view === 'import'" class="workspace import-grid">
-        <div class="detail-pane">
+      <section v-else-if="view === 'import'" class="workspace import-workspace">
+        <div class="import-mode-row" role="tablist" aria-label="Import mode">
+          <button
+            type="button"
+            class="import-mode-button"
+            :class="{ active: importMode === 'browse' }"
+            role="tab"
+            :aria-selected="importMode === 'browse'"
+            @click="importMode = 'browse'"
+          >
+            <Icon name="globe" :size="17" />
+            <span>Browse Source</span>
+          </button>
+          <button
+            type="button"
+            class="import-mode-button"
+            :class="{ active: importMode === 'direct' }"
+            role="tab"
+            :aria-selected="importMode === 'direct'"
+            @click="importMode = 'direct'"
+          >
+            <Icon name="link" :size="17" />
+            <span>Direct URL</span>
+          </button>
+        </div>
+
+        <div
+          v-if="recentImportTask && isTaskActive(recentImportTask)"
+          class="inline-task-panel import-task-panel"
+          :class="recentImportTask.status"
+        >
+          <div class="inline-task-head">
+            <span class="task-state" :class="recentImportTask.status"></span>
+            <span class="row-main">
+              <strong>{{ recentImportTask.title }}</strong>
+              <small>{{ recentImportTask.message || recentImportTask.kind }}</small>
+            </span>
+            <span class="status-pill" :class="recentImportTask.status">{{ recentImportTask.status }}</span>
+          </div>
+          <div class="task-progress">
+            <div class="progress-track">
+              <span :style="{ width: `${taskProgress(recentImportTask)}%` }"></span>
+            </div>
+            <strong>{{ taskProgress(recentImportTask) }}%</strong>
+          </div>
+          <div v-if="recentImportMediaEntries.length" class="image-strip compact">
+            <div
+              v-for="entry in recentImportMediaEntries"
+              :key="entry.key"
+              class="image-card"
+              :class="{ failed: entry.status === 'failed' }"
+            >
+              <button
+                v-if="entry.status === 'cached'"
+                class="image-thumb"
+                type="button"
+                @click="openImagePreview(entry.public_url, recentImportImages)"
+              >
+                <img :src="entry.public_url" alt="" draggable="false" @dragstart.prevent />
+              </button>
+              <button
+                v-else
+                class="image-thumb image-placeholder"
+                type="button"
+                :disabled="!recentImportSourceItem || retryingMediaURL === entry.original_url"
+                @click="recentImportSourceItem && retryItemImage(recentImportSourceItem, entry)"
+              >
+                <Icon name="refresh" :size="18" />
+                <span class="compact-placeholder-label">{{ retryingMediaURL === entry.original_url ? "Retrying" : "Retry" }}</span>
+              </button>
+            </div>
+          </div>
+          <div class="result-actions">
+            <strong v-if="taskResultTitle(recentImportTask)" class="result-title">
+              {{ taskResultTitle(recentImportTask) }}
+            </strong>
+            <button
+              v-if="taskResultTitle(recentImportTask)"
+              class="secondary"
+              @click="openTaskResult(recentImportTask)"
+            >
+              <Icon name="eye" :size="17" />
+              <span>Open result</span>
+            </button>
+            <button class="secondary" @click="openTask(recentImportTask)">
+              <Icon name="activity" :size="17" />
+              <span>Task</span>
+            </button>
+          </div>
+        </div>
+        <div v-else-if="recentImportTask" class="import-result-strip" :class="recentImportTask.status">
+          <span class="task-state" :class="recentImportTask.status"></span>
+          <span class="row-main">
+            <strong>{{ taskResultTitle(recentImportTask) || recentImportTask.title }}</strong>
+            <small>{{ recentImportTask.error || recentImportTask.message || recentImportTask.status }}</small>
+          </span>
+          <button
+            v-if="taskResultTitle(recentImportTask)"
+            class="secondary"
+            @click="openTaskResult(recentImportTask)"
+          >
+            <Icon name="eye" :size="17" />
+            <span>Open result</span>
+          </button>
+          <button class="secondary" @click="openTask(recentImportTask)">
+            <Icon name="activity" :size="17" />
+            <span>Task</span>
+          </button>
+          <button class="icon-button" title="Dismiss import result" @click="dismissRecentImportTask">
+            <Icon name="x" :size="17" />
+          </button>
+        </div>
+
+        <div v-if="importMode === 'browse'" class="detail-pane adapter-browser-pane import-browser-pane">
+          <div class="adapter-browser-controls">
+            <label>
+              <span>Adapter</span>
+              <select v-model="selectedAdapterId" @change="resetAdapterBrowse">
+                <option v-for="adapter in availableAdapters" :key="adapter.id" :value="adapter.id">
+                  {{ adapter.name }}
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>Preset</span>
+              <select v-model="adapterBrowseDraft.preset_id" :disabled="!adapterBrowsePresets.length" @change="selectBrowsePreset(adapterBrowseDraft.preset_id)">
+                <option v-for="preset in adapterBrowsePresets" :key="preset.id" :value="preset.id">
+                  {{ preset.label }}
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>Page</span>
+              <input
+                v-model.number="adapterBrowseDraft.page"
+                type="number"
+                min="1"
+                :disabled="!adapterBrowseCapabilities.pagination"
+                @keydown.enter.prevent="browseAdapterList"
+              />
+            </label>
+            <label>
+              <span>Source filter</span>
+              <select
+                :value="adapterBrowseDraft.filter_url"
+                :disabled="!adapterBrowseCapabilities.filter || adapterBrowseFilters.length === 0"
+                @change="selectBrowseFilterFromEvent"
+              >
+                <option value="">None</option>
+                <option v-for="filter in adapterBrowseFilters" :key="filter.id" :value="filter.url">
+                  {{ filter.label }}{{ filter.count ? ` (${filter.count})` : "" }}
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>Source search</span>
+              <input type="search" :disabled="!adapterBrowseCapabilities.search" :placeholder="adapterBrowseCapabilities.search ? 'Search source' : 'Disabled for this adapter'" />
+            </label>
+            <label>
+              <span>Sort by</span>
+              <select v-model="adapterBrowseDraft.sort" :disabled="!adapterBrowseCapabilities.sort">
+                <option value="">Source default</option>
+              </select>
+            </label>
+            <label class="wide">
+              <span>List URL</span>
+              <input v-model="adapterBrowseDraft.url" type="url" :disabled="!adapterBrowseCapabilities.custom_url" placeholder="Use preset, source filter, or paste a list URL" />
+            </label>
+            <div class="form-action-cell">
+              <button class="primary" :disabled="adapterBrowsing || !selectedAdapter.browse.enabled" @click="browseAdapterList">
+                <Icon name="refresh" :size="17" />
+                <span>{{ adapterBrowsing ? "Loading" : "Load" }}</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="capability-note-row">
+            <span v-if="!adapterBrowseCapabilities.search">{{ adapterBrowseCapabilities.search_note }}</span>
+            <span v-if="!adapterBrowseCapabilities.sort">{{ adapterBrowseCapabilities.sort_note }}</span>
+          </div>
+
+          <div v-if="adapterBrowsePage" class="adapter-browser-summary">
+            <div>
+              <strong>{{ adapterBrowsePage.title || selectedAdapter.name }}</strong>
+              <small>Page {{ adapterBrowsePage.page }}{{ adapterBrowsePage.total_pages ? ` / ${adapterBrowsePage.total_pages}` : "" }} · {{ adapterBrowsePage.items.length }} shown</small>
+            </div>
+            <div class="button-row">
+              <button class="secondary" :disabled="!adapterBrowsePage.prev_url || adapterBrowsing" @click="goBrowsePage(-1)">
+                <Icon name="arrow-left" :size="17" />
+                <span>Prev</span>
+              </button>
+              <button class="secondary" :disabled="!adapterBrowsePage.next_url || adapterBrowsing" @click="goBrowsePage(1)">
+                <span>Next</span>
+                <Icon name="arrow-right" :size="17" />
+              </button>
+            </div>
+          </div>
+
+          <div v-if="adapterBrowsePage?.warnings?.length" class="warning-box">
+            <p v-for="warning in adapterBrowsePage.warnings" :key="warning">{{ warning }}</p>
+          </div>
+
+          <div v-if="adapterBrowsePage" class="adapter-result-list">
+            <div v-for="item in adapterBrowsePage.items" :key="item.url" class="adapter-result-row">
+              <div class="adapter-result-cover">
+                <img v-if="adapterBrowseCoverSrc(item)" :src="adapterBrowseCoverSrc(item)" alt="" draggable="false" @dragstart.prevent />
+                <Icon v-else name="image-off" :size="20" />
+              </div>
+              <div class="row-main">
+                <strong>{{ item.title }}</strong>
+                <small>
+                  {{ item.author || "Unknown author" }}
+                  <template v-if="item.latest_at"> · updated {{ formatTimestamp(item.latest_at, item.latest_at) }}</template>
+                </small>
+                <div v-if="item.prefixes?.length" class="tag-row">
+                  <span v-for="tag in item.prefixes" :key="`${item.url}-${tag}`">{{ tag }}</span>
+                </div>
+                <small class="adapter-result-stats">
+                  ID {{ item.external_id || "Unknown" }}
+                  <template v-if="item.replies"> · {{ item.replies }} replies</template>
+                  <template v-if="item.views"> · {{ item.views }} views</template>
+                  <template v-if="item.rating"> · {{ item.rating }}★</template>
+                </small>
+              </div>
+              <div class="row-actions">
+                <a class="secondary" :href="item.url" target="_blank" rel="noreferrer">
+                  <Icon name="external-link" :size="16" />
+                  <span>Open</span>
+                </a>
+                <button class="primary" :disabled="!adapterBrowseCapabilities.import || !item.importable || loading" @click="importBrowseItem(item)">
+                  <Icon name="download" :size="16" />
+                  <span>Import</span>
+                </button>
+              </div>
+            </div>
+            <div v-if="adapterBrowsePage.items.length === 0" class="empty-detail">
+              <strong>No rows returned by the source</strong>
+            </div>
+          </div>
+          <div v-else class="empty-detail">
+            <strong>Load a source list to browse import candidates</strong>
+          </div>
+        </div>
+
+        <div v-else class="detail-pane direct-import-pane">
           <div class="pane-title">
-            <h1>F95zone Import</h1>
+            <h1>Direct URL Import</h1>
             <div class="button-row">
               <button class="secondary" title="Clear import state" @click="clearImportState">
                 <Icon name="x" :size="17" />
@@ -2140,66 +2365,6 @@ onUnmounted(() => {
               <button class="primary" @click="runImport">
                 <Icon name="download" :size="17" />
                 <span>Import</span>
-              </button>
-            </div>
-          </div>
-          <div v-if="recentImportTask" class="inline-task-panel" :class="recentImportTask.status">
-            <div class="inline-task-head">
-              <span class="task-state" :class="recentImportTask.status"></span>
-              <span class="row-main">
-                <strong>{{ recentImportTask.title }}</strong>
-                <small>{{ recentImportTask.message || recentImportTask.kind }}</small>
-              </span>
-              <span class="status-pill" :class="recentImportTask.status">{{ recentImportTask.status }}</span>
-            </div>
-            <div class="task-progress">
-              <div class="progress-track">
-                <span :style="{ width: `${taskProgress(recentImportTask)}%` }"></span>
-              </div>
-              <strong>{{ taskProgress(recentImportTask) }}%</strong>
-            </div>
-            <div v-if="recentImportMediaEntries.length" class="image-strip compact">
-              <div
-                v-for="entry in recentImportMediaEntries"
-                :key="entry.key"
-                class="image-card"
-                :class="{ failed: entry.status === 'failed' }"
-              >
-                <button
-                  v-if="entry.status === 'cached'"
-                  class="image-thumb"
-                  type="button"
-                  @click="openImagePreview(entry.public_url, recentImportImages)"
-                >
-                  <img :src="entry.public_url" alt="" draggable="false" @dragstart.prevent />
-                </button>
-                <button
-                  v-else
-                  class="image-thumb image-placeholder"
-                  type="button"
-                  :disabled="!recentImportSourceItem || retryingMediaURL === entry.original_url"
-                  @click="recentImportSourceItem && retryItemImage(recentImportSourceItem, entry)"
-                >
-                  <Icon name="refresh" :size="18" />
-                  <span class="compact-placeholder-label">{{ retryingMediaURL === entry.original_url ? "Retrying" : "Retry" }}</span>
-                </button>
-              </div>
-            </div>
-            <div class="result-actions">
-              <strong v-if="taskResultTitle(recentImportTask)" class="result-title">
-                {{ taskResultTitle(recentImportTask) }}
-              </strong>
-              <button
-                v-if="taskResultTitle(recentImportTask)"
-                class="secondary"
-                @click="openTaskResult(recentImportTask)"
-              >
-                <Icon name="eye" :size="17" />
-                <span>Open result</span>
-              </button>
-              <button class="secondary" @click="openTask(recentImportTask)">
-                <Icon name="activity" :size="17" />
-                <span>Task</span>
               </button>
             </div>
           </div>
@@ -2268,19 +2433,33 @@ onUnmounted(() => {
               <small>{{ completedTasks.length }}</small>
             </button>
             <template v-if="taskHistoryExpanded">
-              <button
+              <div
                 v-for="task in completedTasks"
                 :key="task.id"
-                class="row-button task-row completed"
-                :class="{ selected: selectedTask?.id === task.id }"
-                @click="selectTask(task)"
+                class="task-row-entry"
               >
-                <span class="task-state" :class="task.status"></span>
-                <span class="row-main">
-                  <strong>{{ task.title }}</strong>
-                  <small>{{ task.status }} · {{ task.message || task.kind }}</small>
-                </span>
-              </button>
+                <button
+                  class="row-button task-row completed"
+                  :class="{ selected: selectedTask?.id === task.id }"
+                  @click="selectTask(task)"
+                >
+                  <span class="task-state" :class="task.status"></span>
+                  <span class="row-main">
+                    <strong>{{ task.title }}</strong>
+                    <small>{{ task.status }} · {{ task.message || task.kind }}</small>
+                  </span>
+                </button>
+                <button
+                  v-if="canRetryTask(task)"
+                  class="task-retry-button"
+                  title="Retry import"
+                  :disabled="retryingTaskId === task.id"
+                  @click.stop="retryTask(task)"
+                >
+                  <Icon name="refresh" :size="16" />
+                  <span>Retry</span>
+                </button>
+              </div>
             </template>
           </div>
         </div>
@@ -2288,7 +2467,18 @@ onUnmounted(() => {
         <div v-if="selectedTask" class="detail-pane task-detail">
           <div class="pane-title">
             <h2>{{ selectedTask.title }}</h2>
-            <span class="status-pill" :class="selectedTask.status">{{ selectedTask.status }}</span>
+            <div class="title-actions">
+              <button
+                v-if="canRetryTask(selectedTask)"
+                class="secondary"
+                :disabled="retryingTaskId === selectedTask.id"
+                @click="retryTask(selectedTask)"
+              >
+                <Icon name="refresh" :size="17" />
+                <span>Retry import</span>
+              </button>
+              <span class="status-pill" :class="selectedTask.status">{{ selectedTask.status }}</span>
+            </div>
           </div>
 
           <div class="task-progress">

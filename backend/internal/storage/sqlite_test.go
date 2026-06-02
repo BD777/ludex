@@ -179,6 +179,48 @@ func TestActiveTaskDedupeKeyOnlyBlocksQueuedAndRunning(t *testing.T) {
 	}
 }
 
+func TestMarkTaskRetriedStoresReplacementTaskID(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	failed, err := store.CreateTask(ctx, domain.Task{
+		Kind:       "import:f95zone",
+		DedupeKey:  "f95zone:12345",
+		Status:     "failed",
+		Title:      "Failed import",
+		Message:    "Import failed",
+		ResultJSON: map[string]any{"import_request": map[string]any{"url": "https://f95zone.to/threads/example.12345/"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := store.CreateTask(ctx, domain.Task{
+		Kind:      "import:f95zone",
+		DedupeKey: "f95zone:12345",
+		Status:    "queued",
+		Title:     "Retry import",
+		Message:   "Queued",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	marked, err := store.MarkTaskRetried(ctx, failed.ID, retry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marked.ResultJSON["retried_by_task_id"] != float64(retry.ID) {
+		t.Fatalf("retried_by_task_id = %#v", marked.ResultJSON["retried_by_task_id"])
+	}
+	if marked.ResultJSON["import_request"] == nil {
+		t.Fatalf("import request was not preserved: %#v", marked.ResultJSON)
+	}
+}
+
 func TestDeleteGameDetachesSourceItemsAndDeletesOnlyGameOwnedMedia(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

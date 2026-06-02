@@ -184,7 +184,7 @@ func TestParseBrowsePageExtractsThreadRowsAndFilters(t *testing.T) {
 				<div class="structItem-title">
 					<a href="/forums/games.2/?prefix_id[0]=3" class="labelLink"><span>Unity</span></a>
 					<a href="/forums/games.2/?prefix_id[0]=18" class="labelLink"><span>Completed</span></a>
-					<a href="/threads/masaguri-train-groper-simulator-v1-0-team-inu-studio.301024/" data-tp-primary="on">Masaguri: Train Groper Simulator [v1.0] [Team Inu Studio]</a>
+					<a href="/threads/masaguri-train-groper-simulator-v1-0-team-inu-studio.301024/" data-preview-url="/threads/masaguri-train-groper-simulator-v1-0-team-inu-studio.301024/preview" data-tp-primary="on">Masaguri: Train Groper Simulator [v1.0] [Team Inu Studio]</a>
 				</div>
 				<ul class="structItem-parts">
 					<li><a class="username">Gameil</a></li>
@@ -225,10 +225,36 @@ func TestParseBrowsePageExtractsThreadRowsAndFilters(t *testing.T) {
 	if item.URL != "https://f95zone.to/threads/masaguri-train-groper-simulator-v1-0-team-inu-studio.301024/" {
 		t.Fatalf("item url = %q", item.URL)
 	}
+	if item.PreviewURL != "https://f95zone.to/threads/masaguri-train-groper-simulator-v1-0-team-inu-studio.301024/preview" {
+		t.Fatalf("preview url = %q", item.PreviewURL)
+	}
 	if strings.Join(item.Prefixes, ",") != "Unity,Completed" {
 		t.Fatalf("prefixes = %#v", item.Prefixes)
 	}
 	if item.Replies != "27" || item.Views != "14K" {
 		t.Fatalf("stats = replies %q views %q", item.Replies, item.Views)
+	}
+}
+
+func TestParseBrowsePreviewCover(t *testing.T) {
+	html := `
+	<html>
+		<body>
+			<article>
+				<div class="bbWrapper">
+					<a href="https://attachments.f95zone.to/2026/06/cover-full.png">
+						<img class="bbImage" src="data:image/svg+xml;charset=utf-8,%3Csvg%2F%3E" data-src="https://attachments.f95zone.to/2026/06/cover-full.png" />
+					</a>
+				</div>
+			</article>
+		</body>
+	</html>`
+
+	cover, err := ParseBrowsePreviewCover("https://f95zone.to/threads/example.123/preview", strings.NewReader(html))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cover != "https://attachments.f95zone.to/2026/06/cover-full.png" {
+		t.Fatalf("cover = %q", cover)
 	}
 }

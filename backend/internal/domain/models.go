@@ -77,6 +77,8 @@ type AdapterListItem struct {
 	ExternalID string   `json:"external_id"`
 	Title      string   `json:"title"`
 	URL        string   `json:"url"`
+	PreviewURL string   `json:"preview_url"`
+	CoverImage string   `json:"cover_image"`
 	Author     string   `json:"author"`
 	StartedAt  string   `json:"started_at"`
 	LatestAt   string   `json:"latest_at"`

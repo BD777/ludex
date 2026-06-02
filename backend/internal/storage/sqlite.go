@@ -194,6 +194,7 @@ CREATE INDEX IF NOT EXISTS idx_source_items_source ON source_items(source_id);
 CREATE INDEX IF NOT EXISTS idx_source_items_match ON source_items(matched_game_id);
 CREATE INDEX IF NOT EXISTS idx_media_assets_game ON media_assets(game_id);
 CREATE INDEX IF NOT EXISTS idx_media_assets_source_item ON media_assets(source_item_id);
+CREATE INDEX IF NOT EXISTS idx_media_assets_original_url ON media_assets(original_url);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
@@ -786,6 +787,16 @@ WHERE id = ?`, id)
 	return scanMediaAsset(row)
 }
 
+func (s *Store) GetMediaAssetByOriginalURL(ctx context.Context, originalURL string) (domain.MediaAsset, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, game_id, source_item_id, type, local_path, original_url, hash, created_at
+FROM media_assets
+WHERE original_url = ?
+ORDER BY id DESC
+LIMIT 1`, originalURL)
+	return scanMediaAsset(row)
+}
+
 func (s *Store) ListMediaAssetsForSourceItem(ctx context.Context, sourceItemID int64) ([]domain.MediaAsset, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, game_id, source_item_id, type, local_path, original_url, hash, created_at
@@ -905,6 +916,36 @@ WHERE id = ?`, id)
 	return scanTask(row)
 }
 
+func (s *Store) MarkTaskRetried(ctx context.Context, id int64, retriedByTaskID int64) (domain.Task, error) {
+	task, err := s.GetTask(ctx, id)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	result := task.ResultJSON
+	if result == nil {
+		result = map[string]any{}
+	}
+	result["retried_by_task_id"] = retriedByTaskID
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = s.db.ExecContext(ctx, `
+UPDATE tasks
+SET message = ?, result_json = ?, updated_at = ?
+WHERE id = ?`,
+		fmt.Sprintf("Retried as task #%d", retriedByTaskID),
+		string(raw),
+		now,
+		id,
+	)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	return s.GetTask(ctx, id)
+}
+
 func (s *Store) GetActiveTaskByDedupeKey(ctx context.Context, kind string, dedupeKey string) (domain.Task, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT id, kind, dedupe_key, status, title, message, progress_current, progress_total, result_json, error, created_at, started_at, finished_at, updated_at
@@ -913,6 +954,20 @@ WHERE kind = ? AND dedupe_key = ? AND status IN ('queued', 'running')
 ORDER BY updated_at DESC, id DESC
 LIMIT 1`, kind, dedupeKey)
 	return scanTask(row)
+}
+
+func (s *Store) MarkActiveTasksInterrupted(ctx context.Context) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.ExecContext(ctx, `
+UPDATE tasks
+SET status = 'failed',
+    message = 'Interrupted by service restart',
+    error = 'Task was active when Ludex service restarted.',
+    finished_at = ?,
+    updated_at = ?
+WHERE status IN ('queued', 'running')
+`, now, now)
+	return err
 }
 
 func (s *Store) StartTask(ctx context.Context, id int64, message string) (domain.Task, error) {

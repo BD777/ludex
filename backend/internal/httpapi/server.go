@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -34,7 +35,10 @@ import (
 var extensionFiles embed.FS
 
 type Server struct {
-	store *storage.Store
+	store            *storage.Store
+	mediaDownloads   chan struct{}
+	browseCoverMu    sync.Mutex
+	browseCoverCache map[string]string
 }
 
 type progressReporter func(current int, total int, message string)
@@ -51,13 +55,20 @@ const (
 	maxMediaBytes   = 25 << 20
 
 	defaultFetchTimeout     = 45 * time.Second
+	browseCoverFetchTimeout = 12 * time.Second
+	mediaDownloadSlots      = 4
 	mediaResponseHeaderWait = 60 * time.Second
 	mediaBodyIdleTimeout    = 2 * time.Minute
 	mediaFetchAttempts      = 3
 )
 
 func New(store *storage.Store) http.Handler {
-	server := &Server{store: store}
+	_ = store.MarkActiveTasksInterrupted(context.Background())
+	server := &Server{
+		store:            store,
+		mediaDownloads:   make(chan struct{}, configuredMediaDownloadSlots()),
+		browseCoverCache: map[string]string{},
+	}
 	r := chi.NewRouter()
 
 	r.Get("/api/health", server.health)
@@ -65,9 +76,12 @@ func New(store *storage.Store) http.Handler {
 	r.Head("/extensions/ludex-browser-bridge.zip", server.serveBrowserExtensionZip)
 	r.Get("/api/tasks", server.listTasks)
 	r.Get("/api/tasks/{taskID}", server.getTask)
+	r.Post("/api/tasks/{taskID}/retry", server.retryTask)
 
 	r.Get("/api/adapters", server.listAdapters)
 	r.Post("/api/adapters/{adapterID}/browse", server.browseAdapter)
+	r.Get("/api/adapters/{adapterID}/browse-cover", server.browseAdapterCover)
+	r.Head("/api/adapters/{adapterID}/browse-cover", server.browseAdapterCover)
 
 	r.Get("/api/games", server.listGames)
 	r.Post("/api/games", server.createGame)
@@ -214,6 +228,30 @@ func (s *Server) browseAdapter(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) browseAdapterCover(w http.ResponseWriter, r *http.Request) {
+	adapterID := strings.TrimSpace(chi.URLParam(r, "adapterID"))
+	if adapterID != "f95zone" {
+		s.serveImagePlaceholder(w, r)
+		return
+	}
+	previewURL := strings.TrimSpace(r.URL.Query().Get("preview_url"))
+	if previewURL == "" || validateF95zoneURL(previewURL) != nil {
+		s.serveImagePlaceholder(w, r)
+		return
+	}
+	authProfile, err := s.authProfileForURL(r.Context(), "f95zone", previewURL)
+	if err != nil {
+		s.serveImagePlaceholder(w, r)
+		return
+	}
+	publicURL, err := s.f95zoneBrowseCoverPublicURL(r.Context(), previewURL, strings.TrimSpace(r.URL.Query().Get("proxy_url")), authProfile)
+	if err != nil {
+		s.serveImagePlaceholder(w, r)
+		return
+	}
+	http.Redirect(w, r, publicURL, http.StatusTemporaryRedirect)
+}
+
 func builtInAdapters() []domain.Adapter {
 	return []domain.Adapter{f95zoneAdapterDescriptor()}
 }
@@ -293,6 +331,58 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, task)
+}
+
+func (s *Server) retryTask(w http.ResponseWriter, r *http.Request) {
+	taskID, err := urlParamInt(r, "taskID")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var retryReq retryTaskRequest
+	if err := decodeJSON(r, &retryReq); err != nil {
+		writeError(w, err)
+		return
+	}
+	task, err := s.store.GetTask(r.Context(), taskID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if task.Status != "failed" {
+		writeError(w, errors.New("only failed tasks can be retried"))
+		return
+	}
+	switch task.Kind {
+	case "import:f95zone":
+		req, err := importF95zoneRequestFromTask(task)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if strings.TrimSpace(retryReq.ProxyURL) != "" {
+			req.ProxyURL = strings.TrimSpace(retryReq.ProxyURL)
+		}
+		nextTask, duplicate, err := s.enqueueF95zoneImport(r.Context(), req)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if _, err := s.store.MarkTaskRetried(r.Context(), task.ID, nextTask.ID); err != nil {
+			writeError(w, err)
+			return
+		}
+		status := http.StatusAccepted
+		if duplicate {
+			status = http.StatusOK
+		}
+		writeJSON(w, status, map[string]any{
+			"task":      nextTask,
+			"duplicate": duplicate,
+		})
+	default:
+		writeError(w, fmt.Errorf("task kind %q does not support retry", task.Kind))
+	}
 }
 
 func (s *Server) listGames(w http.ResponseWriter, r *http.Request) {
@@ -505,57 +595,59 @@ func (s *Server) importF95zone(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) queueF95zoneImport(w http.ResponseWriter, r *http.Request, req importF95zoneRequest) {
-	var err error
-	req, err = s.resolveF95zoneImportRequest(r.Context(), req)
+	task, duplicate, err := s.enqueueF95zoneImport(r.Context(), req)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	status := http.StatusAccepted
+	if duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, map[string]any{
+		"task":      task,
+		"duplicate": duplicate,
+	})
+}
+
+func (s *Server) enqueueF95zoneImport(ctx context.Context, req importF95zoneRequest) (domain.Task, bool, error) {
+	var err error
+	req, err = s.resolveF95zoneImportRequest(ctx, req)
+	if err != nil {
+		return domain.Task{}, false, err
+	}
 	if req.SourceID == nil && strings.TrimSpace(req.URL) == "" && strings.TrimSpace(req.HTML) == "" {
-		writeError(w, errors.New("source_id, url, or html is required"))
-		return
+		return domain.Task{}, false, errors.New("source_id, url, or html is required")
 	}
 	dedupeKey := f95zoneTaskDedupeKey(req)
 	if dedupeKey != "" {
-		existing, err := s.store.GetActiveTaskByDedupeKey(r.Context(), "import:f95zone", dedupeKey)
+		existing, err := s.store.GetActiveTaskByDedupeKey(ctx, "import:f95zone", dedupeKey)
 		if err == nil {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"task":      existing,
-				"duplicate": true,
-			})
-			return
+			return existing, true, nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			writeError(w, err)
-			return
+			return domain.Task{}, false, err
 		}
 	}
-	task, err := s.store.CreateTask(r.Context(), domain.Task{
-		Kind:      "import:f95zone",
-		DedupeKey: dedupeKey,
-		Status:    "queued",
-		Title:     importTaskTitle(req),
-		Message:   "Queued",
+	task, err := s.store.CreateTask(ctx, domain.Task{
+		Kind:       "import:f95zone",
+		DedupeKey:  dedupeKey,
+		Status:     "queued",
+		Title:      importTaskTitle(req),
+		Message:    "Queued",
+		ResultJSON: map[string]any{"import_request": importF95zoneRequestMetadata(req)},
 	})
 	if err != nil {
 		if dedupeKey != "" {
-			existing, lookupErr := s.store.GetActiveTaskByDedupeKey(r.Context(), "import:f95zone", dedupeKey)
+			existing, lookupErr := s.store.GetActiveTaskByDedupeKey(ctx, "import:f95zone", dedupeKey)
 			if lookupErr == nil {
-				writeJSON(w, http.StatusOK, map[string]any{
-					"task":      existing,
-					"duplicate": true,
-				})
-				return
+				return existing, true, nil
 			}
 		}
-		writeError(w, err)
-		return
+		return domain.Task{}, false, err
 	}
 	go s.runF95zoneImportTask(task.ID, req)
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"task":      task,
-		"duplicate": false,
-	})
+	return task, false, nil
 }
 
 func (s *Server) resolveF95zoneImportRequest(ctx context.Context, req importF95zoneRequest) (importF95zoneRequest, error) {
@@ -1259,6 +1351,16 @@ func (s *Server) findCachedMediaAsset(ctx context.Context, sourceItemID int64, o
 }
 
 func (s *Server) cacheMediaAsset(ctx context.Context, rawURL string, sourceItemID *int64, proxyURL string, authProfile *domain.AuthProfile) (domain.MediaAsset, error) {
+	if cached, ok := s.reusableMediaAsset(ctx, rawURL, sourceItemID); ok {
+		return cached, nil
+	}
+
+	release, err := s.acquireMediaDownloadSlot(ctx)
+	if err != nil {
+		return domain.MediaAsset{}, err
+	}
+	defer release()
+
 	body, contentType, err := fetchBytesWithPolicy(ctx, rawURL, proxyURL, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", maxMediaBytes, authProfile, fetchPolicy{
 		NoTotalTimeout:        true,
 		ResponseHeaderTimeout: mediaResponseHeaderWait,
@@ -1304,6 +1406,48 @@ func (s *Server) cacheMediaAsset(ctx context.Context, rawURL string, sourceItemI
 		OriginalURL:  rawURL,
 		Hash:         hash,
 	})
+}
+
+func (s *Server) reusableMediaAsset(ctx context.Context, rawURL string, sourceItemID *int64) (domain.MediaAsset, bool) {
+	asset, err := s.store.GetMediaAssetByOriginalURL(ctx, strings.TrimSpace(rawURL))
+	if err != nil {
+		return domain.MediaAsset{}, false
+	}
+	safePath, err := s.safeDataPath(asset.LocalPath)
+	if err != nil {
+		return domain.MediaAsset{}, false
+	}
+	if _, err := os.Stat(safePath); err != nil {
+		return domain.MediaAsset{}, false
+	}
+	asset.PublicURL = mediaPublicURL(asset.ID)
+	if sourceItemID == nil || (asset.SourceItemID != nil && *asset.SourceItemID == *sourceItemID) {
+		return asset, true
+	}
+	linked, err := s.store.CreateMediaAsset(ctx, domain.MediaAsset{
+		SourceItemID: sourceItemID,
+		Type:         asset.Type,
+		LocalPath:    asset.LocalPath,
+		OriginalURL:  asset.OriginalURL,
+		Hash:         asset.Hash,
+	})
+	if err != nil {
+		return asset, true
+	}
+	linked.PublicURL = mediaPublicURL(linked.ID)
+	return linked, true
+}
+
+func (s *Server) acquireMediaDownloadSlot(ctx context.Context) (func(), error) {
+	if s.mediaDownloads == nil {
+		return func() {}, nil
+	}
+	select {
+	case s.mediaDownloads <- struct{}{}:
+		return func() { <-s.mediaDownloads }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (s *Server) safeDataPath(localPath string) (string, error) {
@@ -1354,6 +1498,10 @@ type importF95zoneRequest struct {
 type retryMediaRequest struct {
 	ProxyURL    string `json:"proxy_url"`
 	OriginalURL string `json:"original_url"`
+}
+
+type retryTaskRequest struct {
+	ProxyURL string `json:"proxy_url"`
 }
 
 type browseAdapterRequest struct {
@@ -1411,8 +1559,121 @@ func (s *Server) browseF95zone(ctx context.Context, req browseAdapterRequest, ca
 	if err != nil {
 		return domain.AdapterBrowsePage{}, err
 	}
+	s.attachCachedF95zoneBrowseCovers(ctx, &page)
 	page.Capabilities = capabilities
 	return page, nil
+}
+
+func (s *Server) attachCachedF95zoneBrowseCovers(ctx context.Context, page *domain.AdapterBrowsePage) {
+	if page == nil || len(page.Items) == 0 {
+		return
+	}
+	for index := range page.Items {
+		if page.Items[index].PreviewURL == "" {
+			continue
+		}
+		if cover := s.cachedBrowseCover(ctx, page.Items[index].PreviewURL); cover != "" {
+			page.Items[index].CoverImage = cover
+			continue
+		}
+	}
+}
+
+func (s *Server) f95zoneBrowseCoverPublicURL(ctx context.Context, previewURL string, proxyURL string, authProfile *domain.AuthProfile) (string, error) {
+	if publicURL := s.cachedBrowseCover(ctx, previewURL); publicURL != "" {
+		return publicURL, nil
+	}
+	previewCtx, cancel := context.WithTimeout(ctx, browseCoverFetchTimeout)
+	defer cancel()
+	body, _, err := fetchBytesWithPolicy(previewCtx, previewURL, proxyURL, "text/html,application/xhtml+xml", maxHTMLBytes, authProfile, fetchPolicy{
+		Timeout:  browseCoverFetchTimeout,
+		Attempts: 1,
+	})
+	if err != nil {
+		return "", err
+	}
+	cover, err := f95zone.ParseBrowsePreviewCover(previewURL, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	if cover == "" {
+		return "", errors.New("no browse cover found")
+	}
+	asset, err := s.cacheMediaAsset(ctx, cover, nil, proxyURL, authProfile)
+	if err != nil {
+		return "", err
+	}
+	asset.PublicURL = mediaPublicURL(asset.ID)
+	s.setCachedBrowseCover(previewURL, asset.PublicURL)
+	return asset.PublicURL, nil
+}
+
+func (s *Server) cachedBrowseCover(ctx context.Context, previewURL string) string {
+	s.browseCoverMu.Lock()
+	publicURL := s.browseCoverCache[previewURL]
+	s.browseCoverMu.Unlock()
+	if publicURL == "" || !s.mediaPublicURLExists(ctx, publicURL) {
+		if publicURL != "" {
+			s.clearCachedBrowseCover(previewURL)
+		}
+		return ""
+	}
+	return publicURL
+}
+
+func (s *Server) setCachedBrowseCover(previewURL string, publicURL string) {
+	if previewURL == "" || publicURL == "" {
+		return
+	}
+	s.browseCoverMu.Lock()
+	defer s.browseCoverMu.Unlock()
+	s.browseCoverCache[previewURL] = publicURL
+}
+
+func (s *Server) clearCachedBrowseCover(previewURL string) {
+	s.browseCoverMu.Lock()
+	defer s.browseCoverMu.Unlock()
+	delete(s.browseCoverCache, previewURL)
+}
+
+func (s *Server) mediaPublicURLExists(ctx context.Context, publicURL string) bool {
+	mediaID, ok := mediaIDFromPublicURL(publicURL)
+	if !ok {
+		return false
+	}
+	asset, err := s.store.GetMediaAsset(ctx, mediaID)
+	if err != nil {
+		return false
+	}
+	safePath, err := s.safeDataPath(asset.LocalPath)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(safePath)
+	return err == nil
+}
+
+func mediaIDFromPublicURL(publicURL string) (int64, bool) {
+	rest, ok := strings.CutPrefix(publicURL, "/api/media/")
+	if !ok {
+		return 0, false
+	}
+	idText, ok := strings.CutSuffix(rest, "/content")
+	if !ok {
+		return 0, false
+	}
+	mediaID, err := strconv.ParseInt(idText, 10, 64)
+	return mediaID, err == nil && mediaID > 0
+}
+
+func (s *Server) serveImagePlaceholder(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = io.WriteString(w, `<svg xmlns="http://www.w3.org/2000/svg" width="176" height="132" viewBox="0 0 176 132"><rect width="176" height="132" rx="10" fill="#f0ece3"/><path d="M58 75l17-18 19 22 10-12 18 21H47z" fill="#d1c8b9"/><circle cx="118" cy="43" r="10" fill="#d1c8b9"/><text x="88" y="110" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#766f63">No cover</text></svg>`)
 }
 
 func validateF95zoneURL(rawURL string) error {
@@ -1766,6 +2027,50 @@ func f95zoneTaskDedupeKey(req importF95zoneRequest) string {
 	return "f95zone:" + externalID
 }
 
+func importF95zoneRequestMetadata(req importF95zoneRequest) map[string]any {
+	metadata := map[string]any{
+		"create_game": req.CreateGame,
+	}
+	if req.SourceID != nil {
+		metadata["source_id"] = *req.SourceID
+	}
+	if strings.TrimSpace(req.URL) != "" {
+		metadata["url"] = strings.TrimSpace(req.URL)
+	}
+	if strings.TrimSpace(req.ProxyURL) != "" {
+		metadata["proxy_url"] = strings.TrimSpace(req.ProxyURL)
+	}
+	if strings.TrimSpace(req.HTML) != "" {
+		metadata["has_html"] = true
+	}
+	return metadata
+}
+
+func importF95zoneRequestFromTask(task domain.Task) (importF95zoneRequest, error) {
+	req := importF95zoneRequest{CreateGame: true}
+	if rawRequest, ok := task.ResultJSON["import_request"]; ok {
+		if raw, err := json.Marshal(rawRequest); err == nil {
+			_ = json.Unmarshal(raw, &req)
+		}
+	}
+	if strings.TrimSpace(req.URL) == "" {
+		if rawURL := strings.TrimPrefix(task.Title, "Import F95zone: "); rawURL != task.Title {
+			req.URL = strings.TrimSpace(rawURL)
+		}
+	}
+	if req.SourceID == nil && strings.TrimSpace(req.URL) == "" {
+		if rawSourceID := strings.TrimPrefix(task.Title, "Import F95zone source #"); rawSourceID != task.Title {
+			if sourceID, err := strconv.ParseInt(strings.TrimSpace(rawSourceID), 10, 64); err == nil && sourceID > 0 {
+				req.SourceID = &sourceID
+			}
+		}
+	}
+	if req.SourceID == nil && strings.TrimSpace(req.URL) == "" {
+		return req, errors.New("could not recover the original import request for this task")
+	}
+	return req, nil
+}
+
 func retryMediaTaskTitle(item domain.SourceItem, originalURL string) string {
 	title := firstNonEmpty(item.Title, item.ExternalID)
 	if strings.TrimSpace(originalURL) != "" {
@@ -1941,6 +2246,24 @@ func minInt(a int, b int) int {
 		return a
 	}
 	return b
+}
+
+func configuredMediaDownloadSlots() int {
+	value := strings.TrimSpace(os.Getenv("LUDEX_MEDIA_DOWNLOAD_SLOTS"))
+	if value == "" {
+		return mediaDownloadSlots
+	}
+	slots, err := strconv.Atoi(value)
+	if err != nil {
+		return mediaDownloadSlots
+	}
+	if slots < 1 {
+		return 1
+	}
+	if slots > 16 {
+		return 16
+	}
+	return slots
 }
 
 func findMediaItemIndex(items []domain.MediaItem, originalURL string) int {

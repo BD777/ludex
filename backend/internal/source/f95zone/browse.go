@@ -117,6 +117,7 @@ func browseItem(rawURL string, sel *goquery.Selection) domain.AdapterListItem {
 		link = sel.Find(".structItem-title a[href*='/threads/']").Last()
 	}
 	threadURL := absoluteURL(rawURL, link.AttrOr("href", ""))
+	previewURL := absoluteURL(rawURL, link.AttrOr("data-preview-url", ""))
 	title := cleanText(link.Text())
 	prefixes := []string{}
 	sel.Find(".structItem-title .labelLink").Each(func(_ int, label *goquery.Selection) {
@@ -130,6 +131,7 @@ func browseItem(rawURL string, sel *goquery.Selection) domain.AdapterListItem {
 		ExternalID: InferExternalID(threadURL),
 		Title:      stripKnownPrefixes(title, prefixes),
 		URL:        threadURL,
+		PreviewURL: previewURL,
 		Author:     cleanText(firstNonEmpty(sel.AttrOr("data-author", ""), sel.Find(".structItem-parts .username").First().Text())),
 		StartedAt:  sel.Find(".structItem-startDate time").First().AttrOr("datetime", ""),
 		LatestAt:   sel.Find(".structItem-latestDate").First().AttrOr("datetime", ""),
@@ -146,6 +148,47 @@ func browseItem(rawURL string, sel *goquery.Selection) domain.AdapterListItem {
 		item.Importable = false
 	}
 	return item
+}
+
+func ParseBrowsePreviewCover(rawURL string, r io.Reader) (string, error) {
+	doc, err := goquery.NewDocumentFromReader(r)
+	if err != nil {
+		return "", err
+	}
+	return browsePreviewImage(rawURL, doc.Selection), nil
+}
+
+func browsePreviewImage(rawURL string, sel *goquery.Selection) string {
+	image := sel.Find(".bbWrapper img.bbImage, .message-body img.bbImage, img.bbImage").First()
+	if image.Length() == 0 {
+		return ""
+	}
+	imageLink := ""
+	if parent := image.ParentFiltered("a[href]"); parent.Length() > 0 {
+		imageLink = parent.AttrOr("href", "")
+	}
+	candidates := []string{
+		imageLink,
+		image.AttrOr("data-src", ""),
+		image.AttrOr("src", ""),
+		image.AttrOr("data-url", ""),
+	}
+	for _, candidate := range candidates {
+		if !usablePreviewImage(candidate) {
+			continue
+		}
+		return absoluteURL(rawURL, candidate)
+	}
+	return ""
+}
+
+func usablePreviewImage(src string) bool {
+	src = strings.TrimSpace(src)
+	if src == "" {
+		return false
+	}
+	lower := strings.ToLower(src)
+	return !strings.HasPrefix(lower, "data:image/svg") && !strings.HasPrefix(lower, "data:image/gif")
 }
 
 func browsePair(sel *goquery.Selection, key string) string {
