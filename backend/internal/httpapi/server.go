@@ -50,9 +50,10 @@ const (
 	maxHTMLBytes    = 20 << 20
 	maxMediaBytes   = 25 << 20
 
-	defaultFetchTimeout = 45 * time.Second
-	mediaFetchTimeout   = 90 * time.Second
-	mediaFetchAttempts  = 3
+	defaultFetchTimeout     = 45 * time.Second
+	mediaResponseHeaderWait = 60 * time.Second
+	mediaBodyIdleTimeout    = 2 * time.Minute
+	mediaFetchAttempts      = 3
 )
 
 func New(store *storage.Store) http.Handler {
@@ -1151,9 +1152,11 @@ func (s *Server) findCachedMediaAsset(ctx context.Context, sourceItemID int64, o
 
 func (s *Server) cacheMediaAsset(ctx context.Context, rawURL string, sourceItemID *int64, proxyURL string, authProfile *domain.AuthProfile) (domain.MediaAsset, error) {
 	body, contentType, err := fetchBytesWithPolicy(ctx, rawURL, proxyURL, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", maxMediaBytes, authProfile, fetchPolicy{
-		Timeout:  mediaFetchTimeout,
-		Attempts: mediaFetchAttempts,
-		Backoff:  []time.Duration{1 * time.Second, 3 * time.Second},
+		NoTotalTimeout:        true,
+		ResponseHeaderTimeout: mediaResponseHeaderWait,
+		BodyIdleTimeout:       mediaBodyIdleTimeout,
+		Attempts:              mediaFetchAttempts,
+		Backoff:               []time.Duration{1 * time.Second, 3 * time.Second},
 	})
 	if err != nil {
 		return domain.MediaAsset{}, err
@@ -1278,9 +1281,12 @@ func fetchBytes(ctx context.Context, rawURL string, proxyURL string, accept stri
 }
 
 type fetchPolicy struct {
-	Timeout  time.Duration
-	Attempts int
-	Backoff  []time.Duration
+	Timeout               time.Duration
+	NoTotalTimeout        bool
+	ResponseHeaderTimeout time.Duration
+	BodyIdleTimeout       time.Duration
+	Attempts              int
+	Backoff               []time.Duration
 }
 
 type httpStatusError struct {
@@ -1294,7 +1300,7 @@ func (e httpStatusError) Error() string {
 }
 
 func fetchBytesWithPolicy(ctx context.Context, rawURL string, proxyURL string, accept string, maxBytes int64, authProfile *domain.AuthProfile, policy fetchPolicy) ([]byte, string, error) {
-	if policy.Timeout <= 0 {
+	if policy.Timeout <= 0 && !policy.NoTotalTimeout {
 		policy.Timeout = defaultFetchTimeout
 	}
 	if policy.Attempts <= 0 {
@@ -1304,7 +1310,7 @@ func fetchBytesWithPolicy(ctx context.Context, rawURL string, proxyURL string, a
 	attemptsMade := 0
 	for attempt := 1; attempt <= policy.Attempts; attempt++ {
 		attemptsMade = attempt
-		body, contentType, err := fetchBytesOnce(ctx, rawURL, proxyURL, accept, maxBytes, authProfile, policy.Timeout)
+		body, contentType, err := fetchBytesOnce(ctx, rawURL, proxyURL, accept, maxBytes, authProfile, policy)
 		if err == nil {
 			return body, contentType, nil
 		}
@@ -1362,6 +1368,7 @@ func isRetryableFetchError(err error) bool {
 		"connection reset",
 		"broken pipe",
 		"unexpected eof",
+		"body read idle",
 		"tls handshake timeout",
 		"http2: stream closed",
 	}
@@ -1373,8 +1380,12 @@ func isRetryableFetchError(err error) bool {
 	return false
 }
 
-func fetchBytesOnce(ctx context.Context, rawURL string, proxyURL string, accept string, maxBytes int64, authProfile *domain.AuthProfile, timeout time.Duration) ([]byte, string, error) {
-	transport := &http.Transport{}
+func fetchBytesOnce(ctx context.Context, rawURL string, proxyURL string, accept string, maxBytes int64, authProfile *domain.AuthProfile, policy fetchPolicy) ([]byte, string, error) {
+	transport := &http.Transport{
+		ResponseHeaderTimeout: policy.ResponseHeaderTimeout,
+		TLSHandshakeTimeout:   30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 	if proxyURL != "" {
 		parsedProxy, err := url.Parse(proxyURL)
 		if err != nil {
@@ -1401,7 +1412,9 @@ func fetchBytesOnce(ctx context.Context, rawURL string, proxyURL string, accept 
 
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   timeout,
+	}
+	if !policy.NoTotalTimeout {
+		client.Timeout = policy.Timeout
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -1428,15 +1441,76 @@ func fetchBytesOnce(ctx context.Context, rawURL string, proxyURL string, accept 
 	if resp.StatusCode >= 400 {
 		return nil, "", httpStatusError{URL: rawURL, StatusCode: resp.StatusCode, Status: resp.Status}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	body, err := readBodyWithLimit(ctx, resp.Body, maxBytes, policy.BodyIdleTimeout)
 	if err != nil {
 		return nil, "", err
 	}
-	if int64(len(body)) > maxBytes {
-		return nil, "", fmt.Errorf("download exceeds %d bytes", maxBytes)
-	}
 	contentType := strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0])
 	return body, contentType, nil
+}
+
+func readBodyWithLimit(ctx context.Context, body io.ReadCloser, maxBytes int64, idleTimeout time.Duration) ([]byte, error) {
+	if idleTimeout <= 0 {
+		data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) > maxBytes {
+			return nil, fmt.Errorf("download exceeds %d bytes", maxBytes)
+		}
+		return data, nil
+	}
+
+	var data bytes.Buffer
+	buf := make([]byte, 32*1024)
+	for {
+		resultCh := make(chan struct {
+			n   int
+			err error
+		}, 1)
+		go func() {
+			n, err := body.Read(buf)
+			resultCh <- struct {
+				n   int
+				err error
+			}{n: n, err: err}
+		}()
+
+		timer := time.NewTimer(idleTimeout)
+		select {
+		case result := <-resultCh:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			if result.n > 0 {
+				if int64(data.Len()+result.n) > maxBytes {
+					return nil, fmt.Errorf("download exceeds %d bytes", maxBytes)
+				}
+				_, _ = data.Write(buf[:result.n])
+			}
+			if errors.Is(result.err, io.EOF) {
+				return data.Bytes(), nil
+			}
+			if result.err != nil {
+				return nil, result.err
+			}
+		case <-timer.C:
+			_ = body.Close()
+			return nil, fmt.Errorf("body read idle for %s", idleTimeout)
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			_ = body.Close()
+			return nil, ctx.Err()
+		}
+	}
 }
 
 func socks5Dialer(proxyURL *url.URL) (proxy.Dialer, error) {
