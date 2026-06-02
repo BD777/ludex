@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -130,6 +131,9 @@ CREATE TABLE IF NOT EXISTS auth_profiles (
 	domain TEXT NOT NULL,
 	cookie_header TEXT NOT NULL DEFAULT '',
 	cookie_count INTEGER NOT NULL DEFAULT 0,
+	cookie_expires_at TEXT NOT NULL DEFAULT '',
+	cookies_json TEXT NOT NULL DEFAULT '[]',
+	username TEXT NOT NULL DEFAULT '',
 	user_agent TEXT NOT NULL DEFAULT '',
 	source_url TEXT NOT NULL DEFAULT '',
 	imported_at TEXT NOT NULL DEFAULT '',
@@ -199,6 +203,15 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 		return err
 	}
 	if err := s.ensureColumn(ctx, "tasks", "dedupe_key", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "auth_profiles", "cookie_expires_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "auth_profiles", "cookies_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "auth_profiles", "username", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
@@ -411,7 +424,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 
 func (s *Store) ListAuthProfiles(ctx context.Context) ([]domain.AuthProfile, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, adapter_id, domain, cookie_header, cookie_count, user_agent, source_url, imported_at, last_used_at, created_at, updated_at
+SELECT id, adapter_id, domain, cookie_header, cookie_count, cookie_expires_at, cookies_json, username, user_agent, source_url, imported_at, last_used_at, created_at, updated_at
 FROM auth_profiles
 ORDER BY updated_at DESC, id DESC`)
 	if err != nil {
@@ -432,7 +445,7 @@ ORDER BY updated_at DESC, id DESC`)
 
 func (s *Store) GetAuthProfile(ctx context.Context, adapterID string, domainName string) (domain.AuthProfile, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, adapter_id, domain, cookie_header, cookie_count, user_agent, source_url, imported_at, last_used_at, created_at, updated_at
+SELECT id, adapter_id, domain, cookie_header, cookie_count, cookie_expires_at, cookies_json, username, user_agent, source_url, imported_at, last_used_at, created_at, updated_at
 FROM auth_profiles
 WHERE adapter_id = ? AND domain = ?`, adapterID, domainName)
 	return scanAuthProfile(row)
@@ -450,12 +463,19 @@ func (s *Store) UpsertAuthProfile(ctx context.Context, input domain.AuthProfile)
 	if importedAt == "" {
 		importedAt = now
 	}
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO auth_profiles (adapter_id, domain, cookie_header, cookie_count, user_agent, source_url, imported_at, last_used_at, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+	cookiesJSON, err := json.Marshal(input.Cookies)
+	if err != nil {
+		return domain.AuthProfile{}, err
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO auth_profiles (adapter_id, domain, cookie_header, cookie_count, cookie_expires_at, cookies_json, username, user_agent, source_url, imported_at, last_used_at, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
 ON CONFLICT(adapter_id, domain) DO UPDATE SET
 	cookie_header = excluded.cookie_header,
 	cookie_count = excluded.cookie_count,
+	cookie_expires_at = excluded.cookie_expires_at,
+	cookies_json = excluded.cookies_json,
+	username = excluded.username,
 	user_agent = excluded.user_agent,
 	source_url = excluded.source_url,
 	imported_at = excluded.imported_at,
@@ -464,6 +484,9 @@ ON CONFLICT(adapter_id, domain) DO UPDATE SET
 		input.Domain,
 		input.CookieHeader,
 		input.CookieCount,
+		input.CookieExpiresAt,
+		string(cookiesJSON),
+		input.Username,
 		input.UserAgent,
 		input.SourceURL,
 		importedAt,
@@ -1033,12 +1056,16 @@ func scanSource(row scanner) (domain.Source, error) {
 
 func scanAuthProfile(row scanner) (domain.AuthProfile, error) {
 	var profile domain.AuthProfile
+	var cookiesJSON string
 	if err := row.Scan(
 		&profile.ID,
 		&profile.AdapterID,
 		&profile.Domain,
 		&profile.CookieHeader,
 		&profile.CookieCount,
+		&profile.CookieExpiresAt,
+		&cookiesJSON,
+		&profile.Username,
 		&profile.UserAgent,
 		&profile.SourceURL,
 		&profile.ImportedAt,
@@ -1048,7 +1075,37 @@ func scanAuthProfile(row scanner) (domain.AuthProfile, error) {
 	); err != nil {
 		return domain.AuthProfile{}, err
 	}
+	if cookiesJSON != "" {
+		_ = json.Unmarshal([]byte(cookiesJSON), &profile.Cookies)
+	}
+	if len(profile.Cookies) == 0 && profile.CookieHeader != "" {
+		profile.Cookies = cookieMetadataFromHeader(profile.CookieHeader, profile.Domain)
+	}
 	return profile, nil
+}
+
+func cookieMetadataFromHeader(cookieHeader string, domainName string) []domain.AuthCookie {
+	seen := map[string]bool{}
+	cookies := []domain.AuthCookie{}
+	for _, part := range strings.Split(cookieHeader, ";") {
+		pair := strings.TrimSpace(part)
+		if pair == "" {
+			continue
+		}
+		name, _, ok := strings.Cut(pair, "=")
+		name = strings.TrimSpace(name)
+		if !ok || name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		cookies = append(cookies, domain.AuthCookie{
+			Name:    name,
+			Domain:  domainName,
+			Path:    "/",
+			Session: true,
+		})
+	}
+	return cookies
 }
 
 func scanSourceItem(row scanner) (domain.SourceItem, error) {

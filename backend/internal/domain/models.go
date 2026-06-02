@@ -25,17 +25,30 @@ type Source struct {
 }
 
 type AuthProfile struct {
-	ID           int64  `json:"id"`
-	AdapterID    string `json:"adapter_id"`
-	Domain       string `json:"domain"`
-	CookieHeader string `json:"-"`
-	CookieCount  int    `json:"cookie_count"`
-	UserAgent    string `json:"user_agent"`
-	SourceURL    string `json:"source_url"`
-	ImportedAt   string `json:"imported_at"`
-	LastUsedAt   string `json:"last_used_at"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
+	ID              int64        `json:"id"`
+	AdapterID       string       `json:"adapter_id"`
+	Domain          string       `json:"domain"`
+	CookieHeader    string       `json:"-"`
+	CookieCount     int          `json:"cookie_count"`
+	CookieExpiresAt string       `json:"cookie_expires_at"`
+	Cookies         []AuthCookie `json:"cookies"`
+	Username        string       `json:"username"`
+	UserAgent       string       `json:"user_agent"`
+	SourceURL       string       `json:"source_url"`
+	ImportedAt      string       `json:"imported_at"`
+	LastUsedAt      string       `json:"last_used_at"`
+	CreatedAt       string       `json:"created_at"`
+	UpdatedAt       string       `json:"updated_at"`
+}
+
+type AuthCookie struct {
+	Name      string `json:"name"`
+	Domain    string `json:"domain"`
+	Path      string `json:"path"`
+	ExpiresAt string `json:"expires_at"`
+	Session   bool   `json:"session"`
+	Secure    bool   `json:"secure"`
+	HTTPOnly  bool   `json:"http_only"`
 }
 
 type SourceItem struct {

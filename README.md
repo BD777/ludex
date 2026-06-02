@@ -38,6 +38,7 @@ profiles into the local service.
 - Use the Tampermonkey menu command on a supported source page to sync readable
   cookies and User-Agent into Ludex.
 - Cookie values are persisted locally but are not returned by the status API.
+  Username and cookie metadata such as names and expiry are exposed for status.
 
 ## Environment
 

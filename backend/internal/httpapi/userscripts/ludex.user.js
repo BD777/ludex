@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ludex Browser Bridge
 // @namespace    http://127.0.0.1:8787/ludex
-// @version      0.3.0
+// @version      0.4.0
 // @description  Sync supported source auth profiles to local Ludex.
 // @author       Ludex
 // @updateURL    http://127.0.0.1:8787/userscripts/ludex.user.js
@@ -136,49 +136,156 @@
     return (document.cookie || "").trim();
   }
 
-  function cookieHeaderFromGM(adapter) {
+  function cookieMetadataFromHeader(cookieHeader, adapter) {
+    const seen = new Set();
+    return cookieHeader
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const separator = part.indexOf("=");
+        if (separator <= 0) {
+          return null;
+        }
+        const name = part.slice(0, separator).trim();
+        if (!name || seen.has(name)) {
+          return null;
+        }
+        seen.add(name);
+        return {
+          name,
+          domain: adapter.domain,
+          path: "/",
+          expires_at: "",
+          session: true,
+          secure: window.location.protocol === "https:",
+          http_only: false
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function cookieExpiry(cookie) {
+    if (!cookie || !cookie.expirationDate) {
+      return "";
+    }
+    const expiresAt = new Date(Number(cookie.expirationDate) * 1000);
+    if (Number.isNaN(expiresAt.getTime())) {
+      return "";
+    }
+    return expiresAt.toISOString();
+  }
+
+  function sanitizeCookie(cookie, adapter) {
+    if (!cookie || !cookie.name || typeof cookie.value !== "string") {
+      return null;
+    }
+    const expiresAt = cookieExpiry(cookie);
+    return {
+      name: cookie.name,
+      domain: cookie.domain || adapter.domain,
+      path: cookie.path || "/",
+      expires_at: expiresAt,
+      session: Boolean(cookie.session) || !expiresAt,
+      secure: Boolean(cookie.secure),
+      http_only: Boolean(cookie.httpOnly)
+    };
+  }
+
+  function cookieBundleFromGM(adapter) {
     if (typeof GM_cookie === "undefined" || typeof GM_cookie.list !== "function") {
-      return Promise.resolve("");
+      return Promise.resolve(null);
     }
     return new Promise((resolve) => {
       try {
         GM_cookie.list({ url: window.location.href }, (cookies, error) => {
           if (error || !Array.isArray(cookies)) {
-            resolve("");
+            resolve(null);
             return;
           }
-          resolve(
-            cookies
-              .filter((cookie) => cookie && cookie.name && typeof cookie.value === "string")
-              .map((cookie) => `${cookie.name}=${cookie.value}`)
-              .join("; ")
-          );
+          const readableCookies = cookies.filter((cookie) => cookie && cookie.name && typeof cookie.value === "string");
+          resolve({
+            header: readableCookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; "),
+            cookies: readableCookies.map((cookie) => sanitizeCookie(cookie, adapter)).filter(Boolean)
+          });
         });
       } catch (err) {
-        resolve("");
+        resolve(null);
       }
     });
   }
 
-  async function cookieHeaderForAdapter(adapter) {
-    const fromGM = await cookieHeaderFromGM(adapter);
-    if (fromGM) {
+  async function cookieBundleForAdapter(adapter) {
+    const fromGM = await cookieBundleFromGM(adapter);
+    if (fromGM && fromGM.header) {
       return fromGM;
     }
-    return readableDocumentCookie();
+    const header = readableDocumentCookie();
+    return {
+      header,
+      cookies: cookieMetadataFromHeader(header, adapter)
+    };
+  }
+
+  function cleanText(value) {
+    return (value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function usernameFromElement(element) {
+    if (!element) {
+      return "";
+    }
+    const candidates = [
+      element.getAttribute("data-username"),
+      element.getAttribute("data-user-name"),
+      element.getAttribute("title"),
+      element.getAttribute("aria-label"),
+      element.textContent
+    ];
+    for (const candidate of candidates) {
+      const username = cleanText(candidate)
+        .replace(/^account\s*/i, "")
+        .replace(/^profile\s*/i, "")
+        .replace(/\s*menu$/i, "");
+      if (username && !/^(log in|login|register|sign up|alerts|inbox)$/i.test(username)) {
+        return username;
+      }
+    }
+    return "";
+  }
+
+  function currentUsername(adapter) {
+    const selectors = [
+      ".p-navgroup-link--user .p-navgroup-linkText",
+      ".p-navgroup-link--user",
+      "a[href*='/account/'][data-xf-click='menu']",
+      "a[href*='/members/'].username",
+      "a[href*='/members/'][data-user-id]",
+      ".avatar[data-user-id]",
+      ".username"
+    ];
+    for (const selector of selectors) {
+      const username = usernameFromElement(document.querySelector(selector));
+      if (username) {
+        return username;
+      }
+    }
+    return "";
   }
 
   async function syncAuthProfile(adapter) {
     showToast(`Syncing ${adapter.name} auth...`, "busy");
     try {
-      const cookieHeader = await cookieHeaderForAdapter(adapter);
-      if (!cookieHeader) {
+      const cookieBundle = await cookieBundleForAdapter(adapter);
+      if (!cookieBundle.header) {
         throw new Error("No readable cookies found");
       }
       const result = await postJSON("/api/auth-profiles/import", {
         adapter_id: adapter.id,
         domain: adapter.domain,
-        cookie_header: cookieHeader,
+        cookie_header: cookieBundle.header,
+        cookies: cookieBundle.cookies,
+        username: currentUsername(adapter),
         user_agent: navigator.userAgent,
         source_url: window.location.href
       });

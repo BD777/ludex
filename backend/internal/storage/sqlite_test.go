@@ -3,7 +3,9 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"local/ludex/internal/domain"
@@ -71,6 +73,58 @@ func TestUpsertSourceItemByAdapterKeyReplacesExistingItem(t *testing.T) {
 	}
 	if len(items) != 1 {
 		t.Fatalf("item count = %d", len(items))
+	}
+}
+
+func TestAuthProfileStoresMetadataWithoutJSONCookieValues(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	profile, err := store.UpsertAuthProfile(ctx, domain.AuthProfile{
+		AdapterID:       "f95zone",
+		Domain:          "f95zone.to",
+		CookieHeader:    "xf_user=secret-user-cookie; xf_csrf=secret-csrf",
+		CookieCount:     2,
+		CookieExpiresAt: "2026-06-03T00:00:00Z",
+		Username:        "demo-user",
+		UserAgent:       "Ludex Test UA",
+		SourceURL:       "https://f95zone.to/account/",
+		Cookies: []domain.AuthCookie{
+			{
+				Name:      "xf_user",
+				Domain:    "f95zone.to",
+				Path:      "/",
+				ExpiresAt: "2026-06-03T00:00:00Z",
+				Secure:    true,
+				HTTPOnly:  true,
+			},
+			{
+				Name:    "xf_csrf",
+				Domain:  "f95zone.to",
+				Path:    "/",
+				Session: true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Username != "demo-user" || profile.CookieExpiresAt == "" || len(profile.Cookies) != 2 {
+		t.Fatalf("profile metadata = %#v", profile)
+	}
+	payload, err := json.Marshal(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "secret-user-cookie") || strings.Contains(string(payload), "secret-csrf") {
+		t.Fatalf("json leaked cookie value: %s", payload)
+	}
+	if !strings.Contains(string(payload), "xf_user") {
+		t.Fatalf("json missing cookie metadata: %s", payload)
 	}
 }
 

@@ -31,12 +31,25 @@ type AuthProfile = {
   adapter_id: string;
   domain: string;
   cookie_count: number;
+  cookie_expires_at: string;
+  cookies: AuthCookie[];
+  username: string;
   user_agent: string;
   source_url: string;
   imported_at: string;
   last_used_at: string;
   created_at: string;
   updated_at: string;
+};
+
+type AuthCookie = {
+  name: string;
+  domain: string;
+  path: string;
+  expires_at: string;
+  session: boolean;
+  secure: boolean;
+  http_only: boolean;
 };
 
 type SourceItem = {
@@ -226,7 +239,7 @@ const browserBridge = {
   mode: "Tampermonkey userscript",
   coverage: "F95zone now, more adapters later",
   install: "Install once",
-  action: "Use the Tampermonkey menu to sync auth"
+  action: "Tampermonkey menu sync"
 };
 
 const builtInAdapters = [
@@ -240,9 +253,12 @@ const builtInAdapters = [
     endpoint: "/api/import/f95zone",
     attachments: "Cached images",
     authDomain: "f95zone.to",
+    authCookieNames: ["xf_user"],
     withoutBridge: "Download links, login-only spoilers/changelog, and some developer/social links may be unavailable."
   }
 ] as const;
+
+type BuiltInAdapter = (typeof builtInAdapters)[number];
 
 const matchGameId = ref("");
 
@@ -300,6 +316,19 @@ const selectedAdapterAuthProfile = computed(() => {
       (profile) => profile.adapter_id === selectedAdapter.value.id && profile.domain === selectedAdapter.value.authDomain
     ) ?? null
   );
+});
+
+const syncedAuthProfiles = computed(() => {
+  return authProfiles.value.filter((profile) => profile.cookie_count > 0);
+});
+
+const globalAuthSummary = computed(() => {
+  if (syncedAuthProfiles.value.length === 0) {
+    return "No auth profiles";
+  }
+  return syncedAuthProfiles.value
+    .map((profile) => `${adapterName(profile.adapter_id)}${profile.username ? ` as ${profile.username}` : ""}`)
+    .join(", ");
 });
 
 const selectedTaskSourceItems = computed(() => {
@@ -897,6 +926,68 @@ function formatTimestamp(value?: string, fallback = "Never") {
   return date.toLocaleString();
 }
 
+function adapterName(adapterID: string) {
+  return builtInAdapters.find((adapter) => adapter.id === adapterID)?.name ?? adapterID;
+}
+
+function formatAuthExpiry(profile?: AuthProfile | null) {
+  if (!profile) {
+    return "Not synced";
+  }
+  if (profile.cookie_expires_at) {
+    return formatTimestamp(profile.cookie_expires_at, "Unknown");
+  }
+  if (profile.cookies?.length && profile.cookies.every((cookie) => cookie.session || !cookie.expires_at)) {
+    return "Browser session";
+  }
+  return "Unknown";
+}
+
+function formatCookieExpiry(cookie: AuthCookie) {
+  if (cookie.expires_at) {
+    return formatTimestamp(cookie.expires_at, "Unknown");
+  }
+  return cookie.session ? "Session" : "Unknown";
+}
+
+function formatCookieFlags(cookie: AuthCookie) {
+  const flags = [];
+  if (cookie.secure) flags.push("Secure");
+  if (cookie.http_only) flags.push("HttpOnly");
+  if (cookie.session) flags.push("Session");
+  return flags.join(" · ");
+}
+
+function hasAdapterAuth(profile: AuthProfile | null | undefined, adapter: BuiltInAdapter) {
+  if (!profile) {
+    return false;
+  }
+  const requiredCookies: readonly string[] = adapter.authCookieNames ?? [];
+  if (requiredCookies.length === 0) {
+    return profile.cookie_count > 0;
+  }
+  const names = new Set((profile.cookies ?? []).map((cookie) => cookie.name));
+  return requiredCookies.some((name) => names.has(name));
+}
+
+function adapterAuthState(profile: AuthProfile | null | undefined, adapter: BuiltInAdapter) {
+  if (!profile) {
+    return "missing";
+  }
+  return hasAdapterAuth(profile, adapter) ? "authorized" : "incomplete";
+}
+
+function adapterAuthStatusClass(profile: AuthProfile | null | undefined, adapter: BuiltInAdapter) {
+  const state = adapterAuthState(profile, adapter);
+  if (state === "authorized") return "succeeded";
+  if (state === "incomplete") return "warning";
+  return "failed";
+}
+
+function adapterAuthStatusLabel(profile: AuthProfile | null | undefined, adapter: BuiltInAdapter) {
+  return adapterAuthState(profile, adapter);
+}
+
 function clearImportState() {
   Object.assign(importDraft, importDraftDefaults);
   localStorage.removeItem(importDraftStorageKey);
@@ -1121,79 +1212,70 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <section v-else-if="view === 'adapters'" class="workspace two-column">
-        <div class="list-pane">
+      <section v-else-if="view === 'adapters'" class="workspace adapters-workspace">
+        <div class="detail-pane bridge-pane">
           <div class="pane-title">
-            <h1>Adapters</h1>
+            <h1>{{ browserBridge.name }}</h1>
+            <a class="primary" :href="browserBridge.userscript" target="_blank" rel="noreferrer">
+              <Icon name="download" :size="17" />
+              <span>Install userscript</span>
+            </a>
           </div>
-          <button
-            v-for="adapter in builtInAdapters"
-            :key="adapter.id"
-            class="row-button"
-            :class="{ selected: selectedAdapterId === adapter.id }"
-            @click="selectedAdapterId = adapter.id"
-          >
-            <span class="source-dot"></span>
-            <span class="row-main">
-              <strong>{{ adapter.name }}</strong>
-              <small>{{ adapter.kind }} · {{ adapter.status }}</small>
-            </span>
-            <Icon name="cable" :size="16" />
-          </button>
+          <dl class="meta-grid">
+            <div>
+              <span>Mode</span>
+              <strong>{{ browserBridge.mode }}</strong>
+            </div>
+            <div>
+              <span>Coverage</span>
+              <strong>{{ browserBridge.coverage }}</strong>
+            </div>
+            <div>
+              <span>Install</span>
+              <strong>{{ browserBridge.install }}</strong>
+            </div>
+            <div>
+              <span>Action</span>
+              <strong>{{ browserBridge.action }}</strong>
+            </div>
+            <div>
+              <span>Auth profiles</span>
+              <strong>{{ syncedAuthProfiles.length }} synced</strong>
+            </div>
+            <div>
+              <span>Userscript</span>
+              <strong>{{ browserBridge.userscript }}</strong>
+            </div>
+            <div class="wide">
+              <span>Global status</span>
+              <strong>{{ globalAuthSummary }}</strong>
+            </div>
+          </dl>
         </div>
 
-        <div class="detail-stack">
-          <div class="detail-pane">
+        <div class="adapters-layout">
+          <div class="list-pane">
             <div class="pane-title">
-              <h2>{{ browserBridge.name }}</h2>
-              <a class="primary" :href="browserBridge.userscript" target="_blank" rel="noreferrer">
-                <Icon name="download" :size="17" />
-                <span>Install userscript</span>
-              </a>
+              <h1>Adapters</h1>
             </div>
-            <dl class="meta-grid">
-              <div>
-                <span>Mode</span>
-                <strong>{{ browserBridge.mode }}</strong>
-              </div>
-              <div>
-                <span>Coverage</span>
-                <strong>{{ browserBridge.coverage }}</strong>
-              </div>
-              <div>
-                <span>Install</span>
-                <strong>{{ browserBridge.install }}</strong>
-              </div>
-              <div>
-                <span>Action</span>
-                <strong>{{ browserBridge.action }}</strong>
-              </div>
-              <div>
-                <span>Userscript</span>
-                <strong>{{ browserBridge.userscript }}</strong>
-              </div>
-              <div>
-                <span>{{ selectedAdapter.name }} cookies</span>
-                <strong>
-                  {{ selectedAdapterAuthProfile ? `${selectedAdapterAuthProfile.cookie_count} saved` : "Not imported" }}
-                </strong>
-              </div>
-              <div>
-                <span>Imported</span>
-                <strong>{{ formatTimestamp(selectedAdapterAuthProfile?.imported_at, "Not imported") }}</strong>
-              </div>
-              <div>
-                <span>Last used</span>
-                <strong>{{ formatTimestamp(selectedAdapterAuthProfile?.last_used_at) }}</strong>
-              </div>
-              <div>
-                <span>User-Agent</span>
-                <strong>{{ selectedAdapterAuthProfile?.user_agent ? "Saved" : "Not saved" }}</strong>
-              </div>
-            </dl>
+            <button
+              v-for="adapter in builtInAdapters"
+              :key="adapter.id"
+              class="row-button"
+              :class="{ selected: selectedAdapterId === adapter.id }"
+              @click="selectedAdapterId = adapter.id"
+            >
+              <span class="source-dot"></span>
+              <span class="row-main">
+                <strong>{{ adapter.name }}</strong>
+                <small>{{ adapter.kind }} · {{ adapter.status }}</small>
+              </span>
+              <Icon name="cable" :size="16" />
+            </button>
           </div>
 
-          <div class="detail-pane">
+          <div class="detail-stack">
+            <div class="detail-pane">
             <div class="pane-title">
               <h2>{{ selectedAdapter.name }}</h2>
               <span class="status-pill succeeded">{{ selectedAdapter.status }}</span>
@@ -1224,6 +1306,69 @@ onUnmounted(() => {
                 <strong>{{ selectedAdapter.withoutBridge }}</strong>
               </div>
             </dl>
+          </div>
+
+            <div class="detail-pane auth-pane">
+              <div class="pane-title">
+                <h2>{{ selectedAdapter.name }} Cookies</h2>
+                <span class="status-pill" :class="adapterAuthStatusClass(selectedAdapterAuthProfile, selectedAdapter)">
+                  {{ adapterAuthStatusLabel(selectedAdapterAuthProfile, selectedAdapter) }}
+                </span>
+              </div>
+
+              <template v-if="selectedAdapterAuthProfile">
+                <dl class="meta-grid">
+                  <div>
+                    <span>Account</span>
+                    <strong>{{ selectedAdapterAuthProfile.username || "Unknown" }}</strong>
+                  </div>
+                  <div>
+                    <span>Cookies</span>
+                    <strong>{{ selectedAdapterAuthProfile.cookie_count }} saved</strong>
+                  </div>
+                  <div>
+                    <span>Expires</span>
+                    <strong>{{ formatAuthExpiry(selectedAdapterAuthProfile) }}</strong>
+                  </div>
+                  <div>
+                    <span>Imported</span>
+                    <strong>{{ formatTimestamp(selectedAdapterAuthProfile.imported_at, "Not synced") }}</strong>
+                  </div>
+                  <div>
+                    <span>Last used</span>
+                    <strong>{{ formatTimestamp(selectedAdapterAuthProfile.last_used_at) }}</strong>
+                  </div>
+                  <div>
+                    <span>User-Agent</span>
+                    <strong>{{ selectedAdapterAuthProfile.user_agent ? "Saved" : "Not saved" }}</strong>
+                  </div>
+                  <div class="wide">
+                    <span>Source page</span>
+                    <strong>{{ selectedAdapterAuthProfile.source_url || "Unknown" }}</strong>
+                  </div>
+                </dl>
+                <div v-if="selectedAdapterAuthProfile.cookies?.length" class="cookie-list">
+                  <div v-for="cookie in selectedAdapterAuthProfile.cookies" :key="cookie.name" class="cookie-chip">
+                    <strong>{{ cookie.name }}</strong>
+                    <span>{{ formatCookieExpiry(cookie) }}</span>
+                    <small v-if="formatCookieFlags(cookie)">{{ formatCookieFlags(cookie) }}</small>
+                  </div>
+                </div>
+                <div v-if="!hasAdapterAuth(selectedAdapterAuthProfile, selectedAdapter)" class="auth-guide">
+                  <strong>Auth profile looks incomplete</strong>
+                  <p>Ludex has basic cookies, but not the login marker this adapter expects. Update the userscript, open F95zone while logged in, then run “Sync F95zone auth to Ludex” from the Tampermonkey menu.</p>
+                </div>
+              </template>
+
+              <div v-else class="auth-guide">
+                <strong>No F95zone auth profile yet</strong>
+                <p>Install or update the global Browser Bridge userscript, open F95zone while logged in, then run the Tampermonkey menu action “Sync F95zone auth to Ludex”.</p>
+                <a class="open-link" :href="browserBridge.userscript" target="_blank" rel="noreferrer">
+                  <Icon name="download" :size="17" />
+                  <span>Install userscript</span>
+                </a>
+              </div>
+            </div>
           </div>
         </div>
       </section>

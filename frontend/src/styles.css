@@ -157,6 +157,19 @@ button {
   gap: 20px;
 }
 
+.adapters-workspace {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+}
+
+.adapters-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
+  gap: 20px;
+  min-height: 0;
+}
+
 .import-grid {
   display: grid;
   grid-template-columns: minmax(320px, 760px);
@@ -614,6 +627,11 @@ textarea:focus {
   background: #2f6f57;
 }
 
+.status-pill.warning {
+  color: #352a14;
+  background: #e7bc58;
+}
+
 .status-pill.failed {
   color: #ffffff;
   background: #b33b3b;
@@ -825,6 +843,47 @@ textarea:focus {
 
 .meta-grid .wide strong {
   white-space: normal;
+}
+
+.cookie-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cookie-chip {
+  display: grid;
+  gap: 2px;
+  min-width: 140px;
+  padding: 9px 10px;
+  border: 1px solid #d7e4dc;
+  border-radius: 8px;
+  background: #f4faf6;
+}
+
+.cookie-chip strong {
+  color: #1f352f;
+  font-size: 0.9rem;
+}
+
+.cookie-chip span,
+.cookie-chip small {
+  color: #667269;
+  font-size: 0.76rem;
+}
+
+.auth-guide {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #d7e4dc;
+  border-radius: 8px;
+  background: #f4faf6;
+}
+
+.auth-guide p {
+  color: #53635a;
 }
 
 .warning-box {
@@ -1106,6 +1165,7 @@ dd {
   }
 
   .two-column,
+  .adapters-layout,
   .meta-grid,
   .match-bar {
     grid-template-columns: 1fr;

@@ -256,13 +256,17 @@ func (s *Server) importAuthProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errors.New("cookie_header is required"))
 		return
 	}
+	cookies := authCookiesOrHeader(input.Cookies, cookieHeader, domainName)
 	profile, err := s.store.UpsertAuthProfile(r.Context(), domain.AuthProfile{
-		AdapterID:    adapterID,
-		Domain:       domainName,
-		CookieHeader: cookieHeader,
-		CookieCount:  countCookies(cookieHeader),
-		UserAgent:    strings.TrimSpace(input.UserAgent),
-		SourceURL:    strings.TrimSpace(input.SourceURL),
+		AdapterID:       adapterID,
+		Domain:          domainName,
+		CookieHeader:    cookieHeader,
+		CookieCount:     maxInt(len(cookies), countCookies(cookieHeader)),
+		CookieExpiresAt: firstCookieExpiry(cookies),
+		Cookies:         cookies,
+		Username:        sanitizeUsername(input.Username),
+		UserAgent:       strings.TrimSpace(input.UserAgent),
+		SourceURL:       strings.TrimSpace(input.SourceURL),
 	})
 	if err != nil {
 		writeError(w, err)
@@ -1179,11 +1183,23 @@ type retryMediaRequest struct {
 }
 
 type importAuthProfileRequest struct {
-	AdapterID    string `json:"adapter_id"`
-	Domain       string `json:"domain"`
-	CookieHeader string `json:"cookie_header"`
-	UserAgent    string `json:"user_agent"`
-	SourceURL    string `json:"source_url"`
+	AdapterID    string                     `json:"adapter_id"`
+	Domain       string                     `json:"domain"`
+	CookieHeader string                     `json:"cookie_header"`
+	Cookies      []authProfileCookieRequest `json:"cookies"`
+	Username     string                     `json:"username"`
+	UserAgent    string                     `json:"user_agent"`
+	SourceURL    string                     `json:"source_url"`
+}
+
+type authProfileCookieRequest struct {
+	Name      string `json:"name"`
+	Domain    string `json:"domain"`
+	Path      string `json:"path"`
+	ExpiresAt string `json:"expires_at"`
+	Session   bool   `json:"session"`
+	Secure    bool   `json:"secure"`
+	HTTPOnly  bool   `json:"http_only"`
 }
 
 func fetchURL(ctx context.Context, rawURL string, proxyURL string, authProfile *domain.AuthProfile) ([]byte, error) {
@@ -1399,6 +1415,109 @@ func normalizeCookieHeader(value string) string {
 	return cookie
 }
 
+func authCookiesOrHeader(inputs []authProfileCookieRequest, cookieHeader string, domainName string) []domain.AuthCookie {
+	cookies := sanitizeAuthCookies(inputs, domainName)
+	if len(cookies) > 0 {
+		return cookies
+	}
+	return authCookiesFromHeader(cookieHeader, domainName)
+}
+
+func sanitizeAuthCookies(inputs []authProfileCookieRequest, domainName string) []domain.AuthCookie {
+	seen := map[string]bool{}
+	cookies := []domain.AuthCookie{}
+	for _, input := range inputs {
+		name := sanitizeCookieName(input.Name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		expiresAt := normalizeCookieExpiry(input.ExpiresAt)
+		cookies = append(cookies, domain.AuthCookie{
+			Name:      name,
+			Domain:    firstNonEmpty(normalizeAuthDomain(input.Domain), domainName),
+			Path:      firstNonEmpty(strings.TrimSpace(input.Path), "/"),
+			ExpiresAt: expiresAt,
+			Session:   input.Session || expiresAt == "",
+			Secure:    input.Secure,
+			HTTPOnly:  input.HTTPOnly,
+		})
+	}
+	return cookies
+}
+
+func authCookiesFromHeader(cookieHeader string, domainName string) []domain.AuthCookie {
+	seen := map[string]bool{}
+	cookies := []domain.AuthCookie{}
+	for _, part := range strings.Split(cookieHeader, ";") {
+		pair := strings.TrimSpace(part)
+		if pair == "" {
+			continue
+		}
+		name, _, ok := strings.Cut(pair, "=")
+		name = sanitizeCookieName(name)
+		if !ok || name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		cookies = append(cookies, domain.AuthCookie{
+			Name:    name,
+			Domain:  domainName,
+			Path:    "/",
+			Session: true,
+		})
+	}
+	return cookies
+}
+
+func sanitizeCookieName(value string) string {
+	name := strings.TrimSpace(value)
+	if len(name) > 120 {
+		name = name[:120]
+	}
+	return name
+}
+
+func sanitizeUsername(value string) string {
+	username := strings.TrimSpace(value)
+	if len(username) > 120 {
+		username = username[:120]
+	}
+	return username
+}
+
+func normalizeCookieExpiry(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return ""
+	}
+	return parsed.UTC().Format(time.RFC3339)
+}
+
+func firstCookieExpiry(cookies []domain.AuthCookie) string {
+	var first time.Time
+	for _, cookie := range cookies {
+		if cookie.ExpiresAt == "" {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339, cookie.ExpiresAt)
+		if err != nil {
+			continue
+		}
+		if first.IsZero() || parsed.Before(first) {
+			first = parsed
+		}
+	}
+	if first.IsZero() {
+		return ""
+	}
+	return first.UTC().Format(time.RFC3339)
+}
+
 func countCookies(cookieHeader string) int {
 	count := 0
 	for _, part := range strings.Split(cookieHeader, ";") {
@@ -1407,6 +1526,13 @@ func countCookies(cookieHeader string) int {
 		}
 	}
 	return count
+}
+
+func maxInt(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func minInt(a int, b int) int {
