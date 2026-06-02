@@ -28,8 +28,8 @@ import (
 	"local/ludex/internal/storage"
 )
 
-//go:embed userscripts/f95zone.user.js
-var f95zoneUserscript string
+//go:embed userscripts/ludex.user.js
+var ludexUserscript string
 
 type Server struct {
 	store *storage.Store
@@ -54,8 +54,10 @@ func New(store *storage.Store) http.Handler {
 	r := chi.NewRouter()
 
 	r.Get("/api/health", server.health)
-	r.Get("/userscripts/f95zone.user.js", server.serveF95zoneUserscript)
-	r.Head("/userscripts/f95zone.user.js", server.serveF95zoneUserscript)
+	r.Get("/userscripts/ludex.user.js", server.serveLudexUserscript)
+	r.Head("/userscripts/ludex.user.js", server.serveLudexUserscript)
+	r.Get("/userscripts/f95zone.user.js", server.serveLudexUserscript)
+	r.Head("/userscripts/f95zone.user.js", server.serveLudexUserscript)
 	r.Get("/api/tasks", server.listTasks)
 	r.Get("/api/tasks/{taskID}", server.getTask)
 
@@ -92,12 +94,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) serveF95zoneUserscript(w http.ResponseWriter, r *http.Request) {
+func (s *Server) serveLudexUserscript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Content-Disposition", `inline; filename="ludex-f95zone.user.js"`)
+	w.Header().Set("Content-Disposition", `inline; filename="ludex.user.js"`)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_, _ = io.WriteString(w, f95zoneUserscript)
+	_, _ = io.WriteString(w, ludexUserscript)
 }
 
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {

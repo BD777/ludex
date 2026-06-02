@@ -206,6 +206,14 @@ const importDraftDefaults = {
 const importDraft = reactive({ ...importDraftDefaults });
 const selectedAdapterId = ref("f95zone");
 
+const browserBridge = {
+  name: "Ludex Browser Bridge",
+  userscript: "/userscripts/ludex.user.js",
+  mode: "Tampermonkey userscript",
+  coverage: "F95zone now, more adapters later",
+  install: "Install once"
+};
+
 const builtInAdapters = [
   {
     id: "f95zone",
@@ -215,8 +223,7 @@ const builtInAdapters = [
     input: "Thread URL / raw HTML",
     dedupe: "Thread ID",
     endpoint: "/api/import/f95zone",
-    attachments: "Cached images",
-    userscript: "/userscripts/f95zone.user.js"
+    attachments: "Cached images"
   }
 ] as const;
 
@@ -1097,43 +1104,63 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <div class="detail-pane">
-          <div class="pane-title">
-            <h2>{{ selectedAdapter.name }}</h2>
-            <div class="button-row">
-              <a class="primary" :href="selectedAdapter.userscript" target="_blank" rel="noreferrer">
+        <div class="detail-stack">
+          <div class="detail-pane">
+            <div class="pane-title">
+              <h2>{{ browserBridge.name }}</h2>
+              <a class="primary" :href="browserBridge.userscript" target="_blank" rel="noreferrer">
                 <Icon name="download" :size="17" />
                 <span>Install userscript</span>
               </a>
+            </div>
+            <dl class="meta-grid">
+              <div>
+                <span>Mode</span>
+                <strong>{{ browserBridge.mode }}</strong>
+              </div>
+              <div>
+                <span>Coverage</span>
+                <strong>{{ browserBridge.coverage }}</strong>
+              </div>
+              <div>
+                <span>Install</span>
+                <strong>{{ browserBridge.install }}</strong>
+              </div>
+              <div>
+                <span>Userscript</span>
+                <strong>{{ browserBridge.userscript }}</strong>
+              </div>
+            </dl>
+          </div>
+
+          <div class="detail-pane">
+            <div class="pane-title">
+              <h2>{{ selectedAdapter.name }}</h2>
               <span class="status-pill succeeded">{{ selectedAdapter.status }}</span>
             </div>
+            <dl class="meta-grid">
+              <div>
+                <span>Adapter key</span>
+                <strong>{{ selectedAdapter.id }}</strong>
+              </div>
+              <div>
+                <span>Input</span>
+                <strong>{{ selectedAdapter.input }}</strong>
+              </div>
+              <div>
+                <span>Dedupe</span>
+                <strong>{{ selectedAdapter.dedupe }}</strong>
+              </div>
+              <div>
+                <span>Attachments</span>
+                <strong>{{ selectedAdapter.attachments }}</strong>
+              </div>
+              <div>
+                <span>Endpoint</span>
+                <strong>{{ selectedAdapter.endpoint }}</strong>
+              </div>
+            </dl>
           </div>
-          <dl class="meta-grid">
-            <div>
-              <span>Adapter key</span>
-              <strong>{{ selectedAdapter.id }}</strong>
-            </div>
-            <div>
-              <span>Input</span>
-              <strong>{{ selectedAdapter.input }}</strong>
-            </div>
-            <div>
-              <span>Dedupe</span>
-              <strong>{{ selectedAdapter.dedupe }}</strong>
-            </div>
-            <div>
-              <span>Attachments</span>
-              <strong>{{ selectedAdapter.attachments }}</strong>
-            </div>
-            <div>
-              <span>Endpoint</span>
-              <strong>{{ selectedAdapter.endpoint }}</strong>
-            </div>
-            <div>
-              <span>Userscript</span>
-              <strong>{{ selectedAdapter.userscript }}</strong>
-            </div>
-          </dl>
         </div>
       </section>
 

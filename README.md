@@ -30,12 +30,13 @@ Open the Vite URL, usually `http://localhost:5173`.
 
 ## Browser Bridge
 
-Ludex ships a Tampermonkey userscript for importing the currently loaded
-logged-in F95zone thread HTML into the local service.
+Ludex ships one Tampermonkey userscript for importing the currently loaded
+logged-in source page HTML into the local service.
 
 - Install from the Ludex `Adapters` page with `Install userscript`.
-- Direct URL: `http://127.0.0.1:8787/userscripts/f95zone.user.js`
-- The script posts the current page URL and HTML to `/api/import/f95zone`.
+- Direct URL: `http://127.0.0.1:8787/userscripts/ludex.user.js`
+- The script detects the current supported source and posts the page URL and
+  HTML to the matching import endpoint.
 
 ## Environment
 

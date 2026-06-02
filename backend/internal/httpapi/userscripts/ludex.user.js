@@ -1,11 +1,11 @@
 // ==UserScript==
-// @name         Ludex F95zone Importer
+// @name         Ludex Browser Bridge
 // @namespace    http://127.0.0.1:8787/ludex
-// @version      0.1.0
-// @description  Send the current logged-in F95zone thread HTML to local Ludex.
+// @version      0.2.0
+// @description  Send supported logged-in source pages to local Ludex.
 // @author       Ludex
-// @updateURL    http://127.0.0.1:8787/userscripts/f95zone.user.js
-// @downloadURL  http://127.0.0.1:8787/userscripts/f95zone.user.js
+// @updateURL    http://127.0.0.1:8787/userscripts/ludex.user.js
+// @downloadURL  http://127.0.0.1:8787/userscripts/ludex.user.js
 // @match        https://f95zone.to/threads/*
 // @match        https://f95zone.to/threads/*/
 // @grant        GM_xmlhttpRequest
@@ -17,8 +17,30 @@
   "use strict";
 
   const LUDEX_BASE_URL = "http://127.0.0.1:8787";
-  const BUTTON_ID = "ludex-import-f95zone";
-  const STYLE_ID = "ludex-import-style";
+  const BUTTON_ID = "ludex-browser-bridge";
+  const STYLE_ID = "ludex-browser-bridge-style";
+
+  const ADAPTERS = [
+    {
+      id: "f95zone",
+      name: "F95zone",
+      endpoint: "/api/import/f95zone",
+      matches(location) {
+        return location.hostname === "f95zone.to" && location.pathname.startsWith("/threads/");
+      },
+      buildPayload() {
+        return {
+          url: window.location.href,
+          html: pageHTML(),
+          create_game: true
+        };
+      }
+    }
+  ];
+
+  function currentAdapter() {
+    return ADAPTERS.find((adapter) => adapter.matches(window.location));
+  }
 
   function installStyle() {
     if (document.getElementById(STYLE_ID)) {
@@ -36,13 +58,17 @@
         align-items: center;
         gap: 8px;
         min-height: 38px;
+        max-width: min(360px, calc(100vw - 36px));
         padding: 0 13px;
+        overflow: hidden;
         border: 0;
         border-radius: 7px;
         color: #ffffff;
         background: #2f6f57;
         box-shadow: 0 14px 32px rgba(0, 0, 0, 0.25);
         font: 700 13px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        text-overflow: ellipsis;
+        white-space: nowrap;
         cursor: pointer;
       }
 
@@ -75,8 +101,8 @@
     return doctype + "\n" + document.documentElement.outerHTML;
   }
 
-  function postToLudex(payload) {
-    const url = `${LUDEX_BASE_URL}/api/import/f95zone`;
+  function postToLudex(adapter, payload) {
+    const url = `${LUDEX_BASE_URL}${adapter.endpoint}`;
     const body = JSON.stringify(payload);
 
     if (typeof GM_xmlhttpRequest === "function") {
@@ -120,24 +146,20 @@
     });
   }
 
-  async function importCurrentThread(button) {
-    setButtonState(button, "Sending to Ludex...", "busy");
+  async function importCurrentPage(adapter, button) {
+    setButtonState(button, `Sending ${adapter.name} to Ludex...`, "busy");
     try {
-      const result = await postToLudex({
-        url: window.location.href,
-        html: pageHTML(),
-        create_game: true
-      });
+      const result = await postToLudex(adapter, adapter.buildPayload());
       const taskID = result && result.task && result.task.id ? ` #${result.task.id}` : "";
       setButtonState(button, `Imported${taskID}`, "ok");
-      window.setTimeout(() => setButtonState(button, "Import to Ludex", "idle"), 3500);
+      window.setTimeout(() => setButtonState(button, `Import ${adapter.name} to Ludex`, "idle"), 3500);
     } catch (err) {
       setButtonState(button, err && err.message ? err.message : "Import failed", "error");
-      window.setTimeout(() => setButtonState(button, "Import to Ludex", "idle"), 6000);
+      window.setTimeout(() => setButtonState(button, `Import ${adapter.name} to Ludex`, "idle"), 6000);
     }
   }
 
-  function mountButton() {
+  function mountButton(adapter) {
     if (document.getElementById(BUTTON_ID)) {
       return;
     }
@@ -145,16 +167,25 @@
     const button = document.createElement("button");
     button.id = BUTTON_ID;
     button.type = "button";
-    button.textContent = "Import to Ludex";
+    button.title = `Send the current ${adapter.name} page HTML to local Ludex`;
+    button.textContent = `Import ${adapter.name} to Ludex`;
     button.addEventListener("click", () => {
-      void importCurrentThread(button);
+      void importCurrentPage(adapter, button);
     });
     document.body.appendChild(button);
   }
 
+  function boot() {
+    const adapter = currentAdapter();
+    if (!adapter) {
+      return;
+    }
+    mountButton(adapter);
+  }
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", mountButton, { once: true });
+    document.addEventListener("DOMContentLoaded", boot, { once: true });
   } else {
-    mountButton();
+    boot();
   }
 })();
