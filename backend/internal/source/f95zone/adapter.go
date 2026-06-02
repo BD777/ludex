@@ -18,6 +18,7 @@ var (
 	versionLikeRE  = regexp.MustCompile(`(?i)\b(?:v(?:ersion)?\.?\s*)?\d+(?:\.\d+){0,4}[a-z0-9._ -]*\b|alpha|beta|demo|chapter\s*\d+|episode\s*\d+`)
 	labelRE        = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9 /_.-]{1,42}):\s*(.+)$`)
 	downloadLineRE = regexp.MustCompile(`(?i)^([A-Za-z][A-Za-z/ +().0-9-]{1,48}):\s*(.*)$`)
+	platformNoteRE = regexp.MustCompile(`^(.+?)\s*\(([^)]*)\)\s*$`)
 	spaceRE        = regexp.MustCompile(`\s+`)
 )
 
@@ -27,6 +28,11 @@ var sectionLabels = []string{
 	"Overview", "Story", "Description", "Changelog", "Change Log", "Installation",
 	"Developer Notes", "Features", "Controls", "System Requirements", "Fan Signatures",
 	"Download", "Downloads",
+}
+
+type richLine struct {
+	Text  string
+	Links []domain.NamedURL
 }
 
 func ParseHTML(rawURL string, r io.Reader) (domain.Transcript, error) {
@@ -279,7 +285,7 @@ func extractFields(title string, prefixes []string, keyValues map[string][]strin
 		Languages:        uniqueStrings(append(splitList(firstKeyValue(keyValues, "Language")), splitList(firstKeyValue(keyValues, "Languages"))...)),
 		Genres:           splitList(firstKeyValue(keyValues, "Genre", "Genres")),
 		Changelog:        changelog,
-		DownloadGroups:   extractDownloadGroups(lines),
+		DownloadGroups:   extractDownloadGroups(body, lines),
 	}
 	if fields.Version == "" {
 		fields.Version = inferVersionFromTitle(title)
@@ -354,15 +360,87 @@ func collectLinks(sel *goquery.Selection, links []domain.NamedURL, seen map[stri
 	return links
 }
 
-func extractDownloadGroups(lines []string) []domain.DownloadGroup {
+func extractDownloadGroups(body *goquery.Selection, lines []string) []domain.DownloadGroup {
+	if groups := extractDownloadGroupsFromRichLines(downloadRichLines(body)); len(groups) > 0 {
+		return groups
+	}
+	return extractDownloadGroupsFromLines(lines)
+}
+
+func downloadRichLines(body *goquery.Selection) []richLine {
+	lines := []richLine{}
+	current := richLine{}
+
+	appendText := func(value string) {
+		value = cleanText(value)
+		if value == "" {
+			return
+		}
+		current.Text = cleanText(strings.TrimSpace(current.Text + " " + value))
+	}
+	flush := func() {
+		current.Text = cleanText(current.Text)
+		if current.Text != "" || len(current.Links) > 0 {
+			lines = append(lines, current)
+		}
+		current = richLine{}
+	}
+
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node == nil {
+			return
+		}
+		if node.Type == html.TextNode {
+			appendText(node.Data)
+			return
+		}
+		if node.Type != html.ElementNode {
+			for child := node.FirstChild; child != nil; child = child.NextSibling {
+				walk(child)
+			}
+			return
+		}
+		switch strings.ToLower(node.Data) {
+		case "br":
+			flush()
+			return
+		case "a":
+			name := cleanText(nodeText(node))
+			href := strings.TrimSpace(nodeAttr(node, "href"))
+			appendText(name)
+			if href != "" && name != "" {
+				current.Links = append(current.Links, domain.NamedURL{Name: name, URL: href})
+			}
+			return
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+		switch strings.ToLower(node.Data) {
+		case "div", "p", "li", "blockquote":
+			flush()
+		}
+	}
+
+	for _, node := range body.Nodes {
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	flush()
+	return lines
+}
+
+func extractDownloadGroupsFromRichLines(lines []richLine) []domain.DownloadGroup {
 	groups := []domain.DownloadGroup{}
 	inDownloads := false
 	for _, line := range lines {
-		line = cleanText(strings.Trim(line, "[]"))
-		if line == "" {
+		text := cleanText(strings.Trim(line.Text, "[]"))
+		if text == "" {
 			continue
 		}
-		upper := strings.ToUpper(line)
+		upper := strings.ToUpper(text)
 		if upper == "DOWNLOAD" || upper == "DOWNLOADS" {
 			inDownloads = true
 			continue
@@ -373,21 +451,56 @@ func extractDownloadGroups(lines []string) []domain.DownloadGroup {
 		if strings.HasPrefix(upper, "PATCHES") || strings.HasPrefix(upper, "EXTRAS") || strings.HasPrefix(upper, "LANGUAGES") || strings.HasPrefix(upper, "* ") {
 			break
 		}
-		match := downloadLineRE.FindStringSubmatch(line)
+		match := downloadLineRE.FindStringSubmatch(text)
 		if len(match) != 3 {
 			continue
 		}
-		platform := cleanText(match[1])
+		platform, note := splitPlatformNote(cleanText(match[1]))
 		if !looksLikePlatform(platform) {
 			continue
 		}
 		group := domain.DownloadGroup{
 			Platform: platform,
-			Links:    splitDownloadNames(match[2]),
+			Note:     note,
+			Links:    downloadLinksForLine(line, match[2]),
 		}
 		groups = append(groups, group)
 	}
 	return groups
+}
+
+func splitPlatformNote(value string) (string, string) {
+	match := platformNoteRE.FindStringSubmatch(value)
+	if len(match) != 3 {
+		return value, ""
+	}
+	return cleanText(match[1]), cleanText(match[2])
+}
+
+func extractDownloadGroupsFromLines(lines []string) []domain.DownloadGroup {
+	richLines := make([]richLine, 0, len(lines))
+	for _, line := range lines {
+		richLines = append(richLines, richLine{Text: line})
+	}
+	return extractDownloadGroupsFromRichLines(richLines)
+}
+
+func downloadLinksForLine(line richLine, fallbackText string) []domain.NamedURL {
+	seen := map[string]bool{}
+	links := []domain.NamedURL{}
+	for _, link := range line.Links {
+		name := cleanText(strings.Trim(link.Name, "* "))
+		url := strings.TrimSpace(link.URL)
+		if name == "" || url == "" || strings.Contains(strings.ToLower(name), "registered") || seen[url] {
+			continue
+		}
+		seen[url] = true
+		links = append(links, domain.NamedURL{Name: name, URL: url})
+	}
+	if len(links) > 0 {
+		return links
+	}
+	return splitDownloadNames(fallbackText)
 }
 
 func splitDownloadNames(value string) []domain.NamedURL {
@@ -404,6 +517,31 @@ func splitDownloadNames(value string) []domain.NamedURL {
 		}
 	}
 	return links
+}
+
+func nodeText(node *html.Node) string {
+	if node == nil {
+		return ""
+	}
+	if node.Type == html.TextNode {
+		return node.Data
+	}
+	parts := []string{}
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if text := nodeText(child); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func nodeAttr(node *html.Node, name string) string {
+	for _, attr := range node.Attr {
+		if strings.EqualFold(attr.Key, name) {
+			return attr.Val
+		}
+	}
+	return ""
 }
 
 func looksLikePlatform(value string) bool {

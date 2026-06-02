@@ -65,3 +65,51 @@ func TestParseHTMLExtractsThreadMeta(t *testing.T) {
 		t.Fatalf("operating systems = %#v", transcript.Fields.OperatingSystems)
 	}
 }
+
+func TestParseHTMLExtractsDownloadLinks(t *testing.T) {
+	html := `
+	<html>
+		<body>
+			<h1 class="p-title-value">Intertwined [v0.15] [Nyx]</h1>
+			<article class="message--post">
+				<div class="bbWrapper">
+					<b>DOWNLOAD</b><br />
+					<b>Win/Linux</b>: <a href="https://buzz.test/win">BUZZHEAVIER</a> - <a href="https://data.test/win.zip">DATANODES</a><br />
+					<b>Mac</b> (v0.14.1): <a href="https://mega.test/mac">MEGA</a><br />
+					<b>Patches:</b> <a href="https://patch.test">Ignore me</a>
+				</div>
+			</article>
+		</body>
+	</html>`
+
+	transcript, err := ParseHTML("https://f95zone.to/threads/intertwined.53676/", strings.NewReader(html))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	groups := transcript.Fields.DownloadGroups
+	if len(groups) != 2 {
+		t.Fatalf("download groups = %#v", groups)
+	}
+	if groups[0].Platform != "Win/Linux" {
+		t.Fatalf("first platform = %q", groups[0].Platform)
+	}
+	if len(groups[0].Links) != 2 {
+		t.Fatalf("first links = %#v", groups[0].Links)
+	}
+	if groups[0].Links[0].Name != "BUZZHEAVIER" || groups[0].Links[0].URL != "https://buzz.test/win" {
+		t.Fatalf("first link = %#v", groups[0].Links[0])
+	}
+	if groups[0].Links[1].Name != "DATANODES" || groups[0].Links[1].URL != "https://data.test/win.zip" {
+		t.Fatalf("second link = %#v", groups[0].Links[1])
+	}
+	if groups[1].Platform != "Mac" {
+		t.Fatalf("second platform = %q", groups[1].Platform)
+	}
+	if groups[1].Note != "v0.14.1" {
+		t.Fatalf("second note = %q", groups[1].Note)
+	}
+	if len(groups[1].Links) != 1 || groups[1].Links[0].URL != "https://mega.test/mac" {
+		t.Fatalf("second links = %#v", groups[1].Links)
+	}
+}

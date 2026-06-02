@@ -886,6 +886,19 @@ textarea:focus {
   color: #53635a;
 }
 
+.empty-detail {
+  display: grid;
+  min-height: 240px;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  color: #7b857f;
+}
+
+.empty-detail strong {
+  color: #31413a;
+}
+
 .warning-box {
   display: grid;
   gap: 6px;
@@ -926,6 +939,55 @@ textarea:focus {
   background: #dce8dc;
 }
 
+.download-list {
+  display: grid;
+  gap: 6px;
+}
+
+.download-link {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid #d9e4dc;
+  border-radius: 7px;
+  color: #1f4f3d;
+  background: #f5faf6;
+  text-decoration: none;
+}
+
+.download-link strong,
+.download-link small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-link strong {
+  font-size: 0.88rem;
+}
+
+.download-link small {
+  color: #5e7167;
+  font-size: 0.74rem;
+}
+
+.download-link:hover {
+  border-color: #9ec1ae;
+  background: #edf7f0;
+}
+
+.download-link.missing-url {
+  color: #6b6258;
+  border-color: #ded6ca;
+  background: #fbf7ef;
+}
+
+.download-link.missing-url small {
+  color: #8a7668;
+}
+
 dl {
   display: grid;
   grid-template-columns: 150px minmax(0, 1fr);
@@ -936,6 +998,14 @@ dl {
 dt {
   color: #667269;
   font-weight: 720;
+}
+
+dt small {
+  display: block;
+  margin-top: 2px;
+  color: #8a948e;
+  font-size: 0.75rem;
+  font-weight: 620;
 }
 
 dd {

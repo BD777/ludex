@@ -170,6 +170,8 @@ type TranscriptFields = {
 
 type ViewName = "games" | "adapters" | "import" | "items" | "tasks";
 
+type GamePanelMode = "detail" | "edit" | "new";
+
 type DeleteTarget =
   | {
       kind: "game";
@@ -206,6 +208,7 @@ const pendingDelete = ref<DeleteTarget | null>(null);
 const deleting = ref(false);
 const previewImage = ref("");
 const previewSequence = ref<string[]>([]);
+const gamePanelMode = ref<GamePanelMode>("detail");
 const matchEditing = ref(false);
 const mediaRetrying = ref(false);
 const retryingMediaURL = ref("");
@@ -281,6 +284,45 @@ const selectedTranscript = computed(() => selectedItem.value?.parsed_json ?? {})
 const keyValues = computed(() => {
   const values = selectedTranscript.value.key_values ?? {};
   return Object.entries(values);
+});
+
+const selectedGameSourceItems = computed(() => {
+  if (!selectedGame.value) {
+    return [];
+  }
+  return sourceItems.value
+    .filter((item) => item.matched_game_id === selectedGame.value?.id)
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.updated_at || left.fetched_at || left.created_at);
+      const rightTime = Date.parse(right.updated_at || right.fetched_at || right.created_at);
+      return rightTime - leftTime;
+    });
+});
+
+const selectedGameSourceItem = computed(() => selectedGameSourceItems.value[0] ?? null);
+
+const selectedGameTranscript = computed(() => selectedGameSourceItem.value?.parsed_json ?? {});
+
+const selectedGameKeyValues = computed(() => {
+  const values = selectedGameTranscript.value.key_values ?? {};
+  return Object.entries(values);
+});
+
+const selectedGameMediaEntries = computed(() => {
+  return transcriptImageEntries(selectedGameTranscript.value);
+});
+
+const selectedGamePreviewImages = computed(() => {
+  return selectedGameMediaEntries.value.filter((entry) => entry.status === "cached").map((entry) => entry.public_url);
+});
+
+const selectedGameCoverImage = computed(() => {
+  return (
+    selectedGame.value?.cover_image ||
+    selectedGameTranscript.value.fields?.cover_image ||
+    selectedGameTranscript.value.inferred?.cover_image ||
+    ""
+  );
 });
 
 const previewMediaEntries = computed(() => {
@@ -435,8 +477,21 @@ async function loadLibrary() {
   sources.value = nextSources;
   authProfiles.value = nextAuthProfiles;
   sourceItems.value = nextItems;
-  if (!selectedGame.value && nextGames.length > 0) {
-    editGame(nextGames[0]);
+  if (selectedGame.value) {
+    const refreshedGame = nextGames.find((game) => game.id === selectedGame.value?.id) ?? null;
+    selectedGame.value = refreshedGame;
+    if (refreshedGame) {
+      assignGameDraft(refreshedGame);
+    } else if (gamePanelMode.value !== "new") {
+      gamePanelMode.value = "detail";
+    }
+  }
+  if (!selectedGame.value && nextGames.length > 0 && gamePanelMode.value !== "new") {
+    selectGame(nextGames[0]);
+  }
+  if (nextGames.length === 0 && gamePanelMode.value !== "new") {
+    selectedGame.value = null;
+    gamePanelMode.value = "detail";
   }
   if (!selectedItem.value && nextItems.length > 0) {
     selectedItem.value = nextItems[0];
@@ -466,6 +521,7 @@ async function loadTasks() {
 
 function newGame() {
   selectedGame.value = null;
+  gamePanelMode.value = "new";
   Object.assign(gameDraft, {
     id: 0,
     title: "",
@@ -476,7 +532,7 @@ function newGame() {
   });
 }
 
-function editGame(game: Game) {
+function assignGameDraft(game: Game) {
   selectedGame.value = game;
   Object.assign(gameDraft, {
     id: game.id,
@@ -486,6 +542,34 @@ function editGame(game: Game) {
     current_version: game.current_version,
     cover_image: game.cover_image
   });
+}
+
+function selectGame(game: Game) {
+  assignGameDraft(game);
+  gamePanelMode.value = "detail";
+}
+
+function editGame(game: Game) {
+  assignGameDraft(game);
+  gamePanelMode.value = "edit";
+}
+
+function startGameEdit() {
+  if (selectedGame.value) {
+    editGame(selectedGame.value);
+  }
+}
+
+function cancelGameForm() {
+  if (selectedGame.value) {
+    selectGame(selectedGame.value);
+    return;
+  }
+  if (games.value.length > 0) {
+    selectGame(games.value[0]);
+    return;
+  }
+  gamePanelMode.value = "detail";
 }
 
 async function saveGame() {
@@ -510,10 +594,10 @@ async function saveGame() {
       : await api<Game>("/api/games", {
           method: "POST",
           body: JSON.stringify(payload)
-        });
+    });
     showNotice("Saved");
     await loadAll();
-    editGame(saved);
+    selectGame(saved);
   } catch (err) {
     error.value = toMessage(err);
   }
@@ -557,7 +641,7 @@ async function createGameFromItem(item: SourceItem) {
     showNotice("Game created");
     await loadAll();
     selectedItem.value = result.item;
-    editGame(result.game);
+    selectGame(result.game);
   } catch (err) {
     error.value = toMessage(err);
   }
@@ -647,7 +731,8 @@ async function setGameCoverFromImage(image: string) {
     });
     games.value = games.value.map((entry) => (entry.id === saved.id ? saved : entry));
     if (selectedGame.value?.id === saved.id) {
-      editGame(saved);
+      selectedGame.value = saved;
+      assignGameDraft(saved);
     }
     showNotice("Cover updated");
   } catch (err) {
@@ -659,7 +744,7 @@ function openMatchedGame() {
   if (!selectedMatchedGame.value) {
     return;
   }
-  editGame(selectedMatchedGame.value);
+  selectGame(selectedMatchedGame.value);
   view.value = "games";
 }
 
@@ -749,7 +834,7 @@ async function confirmDelete() {
       await api<{ deleted: boolean }>(`/api/games/${target.id}`, { method: "DELETE" });
       showNotice("Game deleted");
       selectedGame.value = null;
-      newGame();
+      gamePanelMode.value = "detail";
     } else {
       await api<{ deleted: boolean }>(`/api/source-items/${target.id}`, { method: "DELETE" });
       showNotice("Item deleted");
@@ -790,7 +875,7 @@ function openTask(task: Task) {
 
 function openTaskResult(task: Task) {
   if (task.result_json?.game) {
-    editGame(task.result_json.game);
+    selectGame(task.result_json.game);
     view.value = "games";
     return;
   }
@@ -1175,7 +1260,7 @@ onUnmounted(() => {
             <button
               class="row-button"
               :class="{ selected: selectedGame?.id === game.id }"
-              @click="editGame(game)"
+              @click="selectGame(game)"
             >
               <img v-if="game.cover_image" :src="game.cover_image" alt="" />
               <span class="row-main">
@@ -1193,13 +1278,19 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="detail-pane">
+        <div v-if="gamePanelMode === 'new' || gamePanelMode === 'edit'" class="detail-pane">
           <div class="pane-title">
-            <h2>{{ gameDraft.id ? "Edit Game" : "New Game" }}</h2>
-            <button class="primary" @click="saveGame">
-              <Icon name="save" :size="17" />
-              <span>Save</span>
-            </button>
+            <h2>{{ gamePanelMode === "edit" ? "Edit Game" : "New Game" }}</h2>
+            <div class="button-row">
+              <button class="secondary" @click="cancelGameForm">
+                <Icon name="x" :size="17" />
+                <span>Cancel</span>
+              </button>
+              <button class="primary" @click="saveGame">
+                <Icon name="save" :size="17" />
+                <span>Save</span>
+              </button>
+            </div>
           </div>
           <label>
             <span>Title</span>
@@ -1221,6 +1312,219 @@ onUnmounted(() => {
             <span>Description</span>
             <textarea v-model="gameDraft.description" rows="12"></textarea>
           </label>
+        </div>
+
+        <div v-else-if="selectedGame" class="detail-pane transcript-pane game-detail-pane">
+          <div class="pane-title">
+            <h2>{{ selectedGame.title }}</h2>
+            <div class="button-row">
+              <button class="secondary" @click="startGameEdit">
+                <Icon name="pencil" :size="17" />
+                <span>Edit</span>
+              </button>
+              <button class="primary" @click="newGame">
+                <Icon name="plus" :size="17" />
+                <span>New</span>
+              </button>
+            </div>
+          </div>
+
+          <div v-if="selectedGameMediaEntries.length" class="image-strip">
+            <div
+              v-for="entry in selectedGameMediaEntries"
+              :key="entry.key"
+              class="image-card"
+              :class="{ failed: entry.status === 'failed' }"
+            >
+              <button
+                v-if="entry.status === 'cached'"
+                class="image-thumb"
+                type="button"
+                @click="openImagePreview(entry.public_url, selectedGamePreviewImages)"
+              >
+                <img :src="entry.public_url" alt="" draggable="false" @dragstart.prevent />
+                <span v-if="entry.public_url === selectedGameCoverImage" class="image-badge">Cover</span>
+              </button>
+              <div v-else class="image-thumb image-placeholder">
+                <Icon name="image-off" :size="20" />
+                <strong>{{ entry.role === "cover" ? "Cover failed" : "Image failed" }}</strong>
+                <small>Open item to retry</small>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="selectedGame.cover_image" class="image-strip compact">
+            <button class="image-thumb" type="button" @click="openImagePreview(selectedGame.cover_image, [selectedGame.cover_image])">
+              <img :src="selectedGame.cover_image" alt="" draggable="false" @dragstart.prevent />
+              <span class="image-badge">Cover</span>
+            </button>
+          </div>
+
+          <div class="meta-grid">
+            <div>
+              <span>Game</span>
+              <strong>{{ selectedGame.title }}</strong>
+            </div>
+            <div>
+              <span>Version</span>
+              <strong>{{ selectedGame.current_version || selectedGameTranscript.fields?.version || selectedGameTranscript.inferred?.version || "Unknown" }}</strong>
+            </div>
+            <div>
+              <span>Developer</span>
+              <strong>{{ selectedGameTranscript.fields?.developer || selectedGameTranscript.inferred?.developer || "Unknown" }}</strong>
+            </div>
+            <div>
+              <span>Engine</span>
+              <strong>{{ selectedGameTranscript.fields?.engine || "Unknown" }}</strong>
+            </div>
+            <div>
+              <span>Prefixes</span>
+              <strong>{{ formatList(selectedGameTranscript.fields?.prefixes) }}</strong>
+            </div>
+            <div>
+              <span>Censored</span>
+              <strong>{{ formatBoolean(selectedGameTranscript.fields?.censored) }}</strong>
+            </div>
+            <div>
+              <span>Updated</span>
+              <strong>{{ selectedGameTranscript.fields?.thread_updated || "Unknown" }}</strong>
+            </div>
+            <div>
+              <span>Released</span>
+              <strong>{{ selectedGameTranscript.fields?.release_date || "Unknown" }}</strong>
+            </div>
+            <div>
+              <span>OS</span>
+              <strong>{{ formatList(selectedGameTranscript.fields?.operating_systems) }}</strong>
+            </div>
+            <div>
+              <span>Language</span>
+              <strong>{{ formatList(selectedGameTranscript.fields?.languages) }}</strong>
+            </div>
+            <div>
+              <span>Genre</span>
+              <strong>{{ formatList(selectedGameTranscript.fields?.genres) }}</strong>
+            </div>
+            <div>
+              <span>Adapter</span>
+              <strong>{{ selectedGameSourceItem ? sourceItemLabel(selectedGameSourceItem) : "Manual" }}</strong>
+            </div>
+            <div class="wide">
+              <span>Aliases</span>
+              <strong>{{ selectedGame.aliases.length ? selectedGame.aliases.join(", ") : "None" }}</strong>
+            </div>
+            <div class="wide">
+              <span>Source URL</span>
+              <strong>{{ selectedGameSourceItem?.raw_url || "None" }}</strong>
+            </div>
+          </div>
+
+          <div v-if="!selectedGameSourceItem" class="warning-box">
+            <p>No adapter transcript is matched to this game yet.</p>
+          </div>
+
+          <section
+            v-if="selectedGame.description || selectedGameTranscript.fields?.description || selectedGameTranscript.inferred?.description"
+            class="transcript-section"
+          >
+            <h3>Overview</h3>
+            <p>{{ selectedGame.description || selectedGameTranscript.fields?.description || selectedGameTranscript.inferred?.description }}</p>
+          </section>
+
+          <section v-if="selectedGameTranscript.fields?.developer_links?.length" class="transcript-section">
+            <h3>Developer Links</h3>
+            <div class="link-list">
+              <a
+                v-for="link in selectedGameTranscript.fields.developer_links"
+                :key="`${link.name}-${link.url}`"
+                :href="link.url"
+                target="_blank"
+              >
+                {{ link.name }}
+              </a>
+            </div>
+          </section>
+
+          <section v-if="selectedGameTranscript.fields?.download_groups?.length" class="transcript-section">
+            <h3>Downloads</h3>
+            <dl>
+              <template v-for="group in selectedGameTranscript.fields.download_groups" :key="group.platform">
+                <dt>
+                  {{ group.platform }}
+                  <small v-if="group.note">{{ group.note }}</small>
+                </dt>
+                <dd>
+                  <div v-if="group.links?.length" class="download-list">
+                    <template v-for="(link, index) in group.links" :key="`${group.platform}-${link.name}-${index}`">
+                      <a v-if="link.url" class="download-link" :href="link.url" target="_blank">
+                        <strong>{{ link.name }}</strong>
+                        <small>{{ link.url }}</small>
+                      </a>
+                      <span v-else class="download-link missing-url">
+                        <strong>{{ link.name }}</strong>
+                        <small>No URL captured</small>
+                      </span>
+                    </template>
+                  </div>
+                  <span v-else>Unknown</span>
+                </dd>
+              </template>
+            </dl>
+          </section>
+
+          <section v-if="selectedGameTranscript.fields?.changelog" class="transcript-section">
+            <h3>Changelog</h3>
+            <p>{{ selectedGameTranscript.fields.changelog }}</p>
+          </section>
+
+          <section v-if="selectedGameKeyValues.length" class="transcript-section">
+            <h3>Raw Fields</h3>
+            <dl>
+              <template v-for="[key, values] in selectedGameKeyValues" :key="key">
+                <dt>{{ key }}</dt>
+                <dd>{{ values.join(", ") }}</dd>
+              </template>
+            </dl>
+          </section>
+
+          <section
+            v-for="section in selectedGameTranscript.sections"
+            :key="section.heading"
+            class="transcript-section"
+          >
+            <h3>{{ section.heading }}</h3>
+            <p>{{ section.body }}</p>
+          </section>
+
+          <div class="result-actions">
+            <button v-if="selectedGameSourceItem" class="secondary" @click="selectItem(selectedGameSourceItem); view = 'items'">
+              <Icon name="file-search" :size="17" />
+              <span>Open item</span>
+            </button>
+            <a
+              v-if="selectedGameSourceItem?.raw_content_path"
+              class="open-link"
+              :href="sourceItemRawURL(selectedGameSourceItem)"
+              target="_blank"
+            >
+              <Icon name="file-search" :size="17" />
+              <span>Open raw HTML</span>
+            </a>
+            <a v-if="selectedGameSourceItem?.raw_url" class="open-link" :href="selectedGameSourceItem.raw_url" target="_blank">
+              <Icon name="eye" :size="17" />
+              <span>Open source</span>
+            </a>
+          </div>
+        </div>
+
+        <div v-else class="detail-pane">
+          <div class="empty-detail">
+            <Icon name="database" :size="24" />
+            <strong>No game selected</strong>
+            <button class="primary" @click="newGame">
+              <Icon name="plus" :size="17" />
+              <span>New game</span>
+            </button>
+          </div>
         </div>
       </section>
 
@@ -1858,15 +2162,23 @@ onUnmounted(() => {
             <h3>Downloads</h3>
             <dl>
               <template v-for="group in selectedTranscript.fields.download_groups" :key="group.platform">
-                <dt>{{ group.platform }}</dt>
+                <dt>
+                  {{ group.platform }}
+                  <small v-if="group.note">{{ group.note }}</small>
+                </dt>
                 <dd>
-                  <template v-if="group.links?.length">
-                    <span v-for="(link, index) in group.links" :key="`${group.platform}-${link.name}-${index}`">
-                      <a v-if="link.url" :href="link.url" target="_blank">{{ link.name }}</a>
-                      <span v-else>{{ link.name }}</span>
-                      <span v-if="index < (group.links?.length ?? 0) - 1">, </span>
-                    </span>
-                  </template>
+                  <div v-if="group.links?.length" class="download-list">
+                    <template v-for="(link, index) in group.links" :key="`${group.platform}-${link.name}-${index}`">
+                      <a v-if="link.url" class="download-link" :href="link.url" target="_blank">
+                        <strong>{{ link.name }}</strong>
+                        <small>{{ link.url }}</small>
+                      </a>
+                      <span v-else class="download-link missing-url">
+                        <strong>{{ link.name }}</strong>
+                        <small>No URL captured</small>
+                      </span>
+                    </template>
+                  </div>
                   <span v-else>Unknown</span>
                 </dd>
               </template>
