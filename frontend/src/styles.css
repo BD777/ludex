@@ -1171,8 +1171,10 @@ textarea:focus {
 }
 
 .adapter-result-cover {
+  position: relative;
   display: grid;
   width: 88px;
+  min-height: 0;
   aspect-ratio: 4 / 3;
   place-items: center;
   overflow: hidden;
@@ -1182,13 +1184,73 @@ textarea:focus {
   background: #f0ece3;
 }
 
+.adapter-result-cover.is-loaded {
+  cursor: zoom-in;
+}
+
+.adapter-result-cover.is-loaded:hover,
+.adapter-result-cover.is-loaded:focus-visible {
+  border-color: #3f8267;
+  box-shadow: 0 0 0 3px rgba(63, 130, 103, 0.14);
+}
+
+.adapter-result-cover:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
 .adapter-result-cover img {
+  grid-area: 1 / 1;
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
+  transition: opacity 160ms ease;
   user-select: none;
   -webkit-user-drag: none;
+}
+
+.adapter-result-cover.is-loading img,
+.adapter-result-cover.is-failed img {
+  opacity: 0;
+}
+
+.cover-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 5px;
+  padding: 6px;
+  color: #6f786f;
+  background: #f0ece3;
+  text-align: center;
+  pointer-events: none;
+}
+
+.cover-loading small {
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  font-weight: 760;
+}
+
+.cover-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #d8d0c2;
+  border-top-color: #2f6f57;
+  border-radius: 999px;
+  animation: cover-spin 850ms linear infinite;
+}
+
+@keyframes cover-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .adapter-result-stats {

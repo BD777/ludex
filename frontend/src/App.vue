@@ -265,6 +265,8 @@ type ImportMode = "browse" | "direct";
 
 type GamePanelMode = "detail" | "edit" | "new";
 
+type CoverLoadState = "loading" | "loaded" | "failed";
+
 type DeleteTarget =
   | {
       kind: "game";
@@ -347,6 +349,7 @@ const adapterBrowseDraftDefaults = {
 const adapterBrowseDraft = reactive({ ...adapterBrowseDraftDefaults });
 const adapterBrowsePage = ref<AdapterBrowsePage | null>(null);
 const adapterBrowsing = ref(false);
+const adapterCoverStates = reactive<Record<string, CoverLoadState>>({});
 
 const browserBridge = {
   name: "Ludex Browser Bridge",
@@ -527,6 +530,10 @@ const adapterBrowseCapabilities = computed(() => selectedAdapter.value.browse.ca
 const adapterBrowsePresets = computed(() => selectedAdapter.value.browse.presets ?? []);
 
 const adapterBrowseFilters = computed(() => adapterBrowsePage.value?.filters ?? []);
+
+const adapterBrowseLoadingCovers = computed(() => {
+  return adapterBrowsePage.value?.items.filter((item) => adapterBrowseCoverStatus(item) === "loading").length ?? 0;
+});
 
 const syncedAuthProfiles = computed(() => {
   return authProfiles.value.filter((profile) => profile.cookie_count > 0);
@@ -852,6 +859,7 @@ async function browseAdapterList() {
       })
     });
     adapterBrowsePage.value = page;
+    prepareAdapterCoverStates(page);
     adapterBrowseDraft.page = page.page || adapterBrowseDraft.page || 1;
     adapterBrowseDraft.url = page.url;
     showNotice("Adapter list loaded");
@@ -929,6 +937,55 @@ function adapterBrowseCoverSrc(item: AdapterListItem) {
     params.set("proxy_url", proxyURL);
   }
   return `/api/adapters/${item.adapter_id}/browse-cover?${params.toString()}`;
+}
+
+function prepareAdapterCoverStates(page: AdapterBrowsePage | null) {
+  if (!page) {
+    return;
+  }
+  for (const item of page.items) {
+    const src = adapterBrowseCoverSrc(item);
+    if (!src || adapterCoverStates[src] === "loaded") {
+      continue;
+    }
+    adapterCoverStates[src] = "loading";
+  }
+}
+
+function adapterBrowseCoverStatus(item: AdapterListItem): CoverLoadState | "missing" {
+  const src = adapterBrowseCoverSrc(item);
+  if (!src) {
+    return "missing";
+  }
+  return adapterCoverStates[src] ?? "loading";
+}
+
+function markAdapterCoverLoaded(src: string) {
+  if (src) {
+    adapterCoverStates[src] = "loaded";
+  }
+}
+
+function markAdapterCoverFailed(src: string) {
+  if (src) {
+    adapterCoverStates[src] = "failed";
+  }
+}
+
+function adapterBrowsePreviewImages() {
+  return (
+    adapterBrowsePage.value?.items
+      .map((item) => adapterBrowseCoverSrc(item))
+      .filter((src) => src && adapterCoverStates[src] === "loaded") ?? []
+  );
+}
+
+function openAdapterBrowseCover(item: AdapterListItem) {
+  const src = adapterBrowseCoverSrc(item);
+  if (!src || adapterCoverStates[src] !== "loaded") {
+    return;
+  }
+  openImagePreview(src, adapterBrowsePreviewImages());
 }
 
 function isExternalURL(value: string) {
@@ -1485,6 +1542,7 @@ function restoreAdapterBrowseState() {
       proxy_url: typeof draft.proxy_url === "string" ? draft.proxy_url : adapterBrowseDraftDefaults.proxy_url
     });
     adapterBrowsePage.value = state.page && Array.isArray(state.page.items) ? state.page : null;
+    prepareAdapterCoverStates(adapterBrowsePage.value);
   } catch {
     localStorage.removeItem(adapterBrowseStorageKey);
   } finally {
@@ -2294,7 +2352,10 @@ onUnmounted(() => {
           <div v-if="adapterBrowsePage" class="adapter-browser-summary">
             <div>
               <strong>{{ adapterBrowsePage.title || selectedAdapter.name }}</strong>
-              <small>Page {{ adapterBrowsePage.page }}{{ adapterBrowsePage.total_pages ? ` / ${adapterBrowsePage.total_pages}` : "" }} · {{ adapterBrowsePage.items.length }} shown</small>
+              <small>
+                Page {{ adapterBrowsePage.page }}{{ adapterBrowsePage.total_pages ? ` / ${adapterBrowsePage.total_pages}` : "" }} · {{ adapterBrowsePage.items.length }} shown
+                <template v-if="adapterBrowseLoadingCovers"> · {{ adapterBrowseLoadingCovers }} covers loading</template>
+              </small>
             </div>
             <div class="button-row">
               <button class="secondary" :disabled="!adapterBrowsePage.prev_url || adapterBrowsing" @click="goBrowsePage(-1)">
@@ -2314,10 +2375,33 @@ onUnmounted(() => {
 
           <div v-if="adapterBrowsePage" class="adapter-result-list">
             <div v-for="item in adapterBrowsePage.items" :key="item.url" class="adapter-result-row">
-              <div class="adapter-result-cover">
-                <img v-if="adapterBrowseCoverSrc(item)" :src="adapterBrowseCoverSrc(item)" alt="" draggable="false" @dragstart.prevent />
-                <Icon v-else name="image-off" :size="20" />
-              </div>
+              <button
+                class="adapter-result-cover"
+                :class="`is-${adapterBrowseCoverStatus(item)}`"
+                type="button"
+                title="Preview cover"
+                :disabled="adapterBrowseCoverStatus(item) !== 'loaded'"
+                @click="openAdapterBrowseCover(item)"
+              >
+                <img
+                  v-if="adapterBrowseCoverSrc(item)"
+                  :src="adapterBrowseCoverSrc(item)"
+                  alt=""
+                  draggable="false"
+                  @dragstart.prevent
+                  @load="markAdapterCoverLoaded(adapterBrowseCoverSrc(item))"
+                  @error="markAdapterCoverFailed(adapterBrowseCoverSrc(item))"
+                />
+                <span v-if="adapterBrowseCoverStatus(item) === 'loading'" class="cover-loading">
+                  <span class="cover-spinner" aria-hidden="true"></span>
+                  <small>Loading</small>
+                </span>
+                <span v-else-if="adapterBrowseCoverStatus(item) === 'failed'" class="cover-loading">
+                  <Icon name="image-off" :size="18" />
+                  <small>Failed</small>
+                </span>
+                <Icon v-else-if="adapterBrowseCoverStatus(item) === 'missing'" name="image-off" :size="20" />
+              </button>
               <div class="row-main">
                 <strong>{{ item.title }}</strong>
                 <small>
