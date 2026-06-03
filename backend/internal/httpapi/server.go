@@ -28,6 +28,7 @@ import (
 	"golang.org/x/net/proxy"
 	"local/ludex/internal/domain"
 	"local/ludex/internal/source/f95zone"
+	telegramsource "local/ludex/internal/source/telegram"
 	"local/ludex/internal/storage"
 )
 
@@ -37,6 +38,7 @@ var extensionFiles embed.FS
 type Server struct {
 	store            *storage.Store
 	mediaDownloads   chan struct{}
+	gameMutationMu   sync.Mutex
 	browseCoverMu    sync.Mutex
 	browseCoverCache map[string]string
 }
@@ -243,12 +245,26 @@ func (s *Server) browseAdapter(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) browseAdapterCover(w http.ResponseWriter, r *http.Request) {
 	adapterID := strings.TrimSpace(chi.URLParam(r, "adapterID"))
-	if adapterID != "f95zone" {
+	previewURL := strings.TrimSpace(r.URL.Query().Get("preview_url"))
+	if previewURL == "" {
 		s.serveImagePlaceholder(w, r)
 		return
 	}
-	previewURL := strings.TrimSpace(r.URL.Query().Get("preview_url"))
-	if previewURL == "" || validateF95zoneURL(previewURL) != nil {
+	if adapterID == "telegram" {
+		if !telegramsource.IsMediaURL(previewURL) {
+			s.serveImagePlaceholder(w, r)
+			return
+		}
+		asset, err := s.cacheMediaAsset(r.Context(), previewURL, nil, "", nil)
+		if err != nil {
+			s.serveImagePlaceholder(w, r)
+			return
+		}
+		asset.PublicURL = mediaPublicURL(asset.ID)
+		http.Redirect(w, r, asset.PublicURL, http.StatusTemporaryRedirect)
+		return
+	}
+	if adapterID != "f95zone" || validateF95zoneURL(previewURL) != nil {
 		s.serveImagePlaceholder(w, r)
 		return
 	}
@@ -881,7 +897,7 @@ func (s *Server) createGameFromSourceItem(w http.ResponseWriter, r *http.Request
 		writeError(w, err)
 		return
 	}
-	game, err := s.createGameFromTranscript(r.Context(), transcript)
+	game, err := s.saveGameFromTranscript(r.Context(), transcript, item.MatchedGameID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1184,9 +1200,19 @@ func (s *Server) serveMedia(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createGameFromTranscript(ctx context.Context, transcript domain.Transcript) (domain.Game, error) {
-	title := firstNonEmpty(transcript.Inferred.GameTitle, transcript.Title)
+	s.gameMutationMu.Lock()
+	defer s.gameMutationMu.Unlock()
+
+	title := transcriptPrimaryGameTitle(transcript)
 	if title == "" {
 		return domain.Game{}, errors.New("cannot create a game without a title")
+	}
+	existing, found, err := s.findExistingGameForTranscript(ctx, transcript)
+	if err != nil {
+		return domain.Game{}, err
+	}
+	if found {
+		return s.updateGameFromTranscript(ctx, transcript, existing)
 	}
 	aliases := []string{}
 	if transcript.Title != "" && !strings.EqualFold(transcript.Title, title) {
@@ -1209,7 +1235,11 @@ func (s *Server) saveGameFromTranscript(ctx context.Context, transcript domain.T
 	if err != nil {
 		return domain.Game{}, err
 	}
-	title := firstNonEmpty(transcript.Inferred.GameTitle, transcript.Title, existing.Title)
+	return s.updateGameFromTranscript(ctx, transcript, existing)
+}
+
+func (s *Server) updateGameFromTranscript(ctx context.Context, transcript domain.Transcript, existing domain.Game) (domain.Game, error) {
+	title := firstNonEmpty(transcriptPrimaryGameTitle(transcript), existing.Title)
 	if title == "" {
 		return domain.Game{}, errors.New("cannot update a game without a title")
 	}
@@ -1224,6 +1254,89 @@ func (s *Server) saveGameFromTranscript(ctx context.Context, transcript domain.T
 		CurrentVersion: firstNonEmpty(transcript.Inferred.Version, existing.CurrentVersion),
 		CoverImage:     firstNonEmpty(transcript.Inferred.CoverImage, existing.CoverImage),
 	})
+}
+
+func (s *Server) findExistingGameForTranscript(ctx context.Context, transcript domain.Transcript) (domain.Game, bool, error) {
+	titles := transcriptGameTitleCandidates(transcript)
+	if len(titles) == 0 {
+		return domain.Game{}, false, nil
+	}
+	targetKeys := map[string]struct{}{}
+	for _, title := range titles {
+		if key := normalizeGameTitleKey(title); key != "" {
+			targetKeys[key] = struct{}{}
+		}
+	}
+	if len(targetKeys) == 0 {
+		return domain.Game{}, false, nil
+	}
+
+	seen := map[int64]struct{}{}
+	for _, title := range titles {
+		candidates, err := s.store.ListGames(ctx, title)
+		if err != nil {
+			return domain.Game{}, false, err
+		}
+		for _, candidate := range candidates {
+			if _, ok := seen[candidate.ID]; ok {
+				continue
+			}
+			seen[candidate.ID] = struct{}{}
+			if gameMatchesTitleKeys(candidate, targetKeys) {
+				return candidate, true, nil
+			}
+		}
+	}
+	return domain.Game{}, false, nil
+}
+
+func transcriptPrimaryGameTitle(transcript domain.Transcript) string {
+	return firstNonEmpty(transcript.Inferred.GameTitle, transcript.Fields.GameName, transcript.Title)
+}
+
+func transcriptGameTitleCandidates(transcript domain.Transcript) []string {
+	return uniqueNonEmptyStrings(
+		transcript.Inferred.GameTitle,
+		transcript.Fields.GameName,
+		transcript.Title,
+	)
+}
+
+func gameMatchesTitleKeys(game domain.Game, targetKeys map[string]struct{}) bool {
+	if _, ok := targetKeys[normalizeGameTitleKey(game.Title)]; ok {
+		return true
+	}
+	for _, alias := range game.Aliases {
+		if _, ok := targetKeys[normalizeGameTitleKey(alias)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeGameTitleKey(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(value))), " ")
+}
+
+func uniqueNonEmptyStrings(values ...string) []string {
+	seen := map[string]struct{}{}
+	result := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := normalizeGameTitleKey(value)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func (s *Server) saveRawContent(sourceType string, rawURL string, content []byte) (string, error) {
@@ -1427,13 +1540,7 @@ func (s *Server) cacheMediaAsset(ctx context.Context, rawURL string, sourceItemI
 	}
 	defer release()
 
-	body, contentType, err := fetchBytesWithPolicy(ctx, rawURL, proxyURL, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", maxMediaBytes, authProfile, fetchPolicy{
-		NoTotalTimeout:        true,
-		ResponseHeaderTimeout: mediaResponseHeaderWait,
-		BodyIdleTimeout:       mediaBodyIdleTimeout,
-		Attempts:              mediaFetchAttempts,
-		Backoff:               []time.Duration{1 * time.Second, 3 * time.Second},
-	})
+	body, contentType, err := s.fetchMediaBytes(ctx, rawURL, proxyURL, authProfile)
 	if err != nil {
 		return domain.MediaAsset{}, err
 	}
@@ -1448,7 +1555,7 @@ func (s *Server) cacheMediaAsset(ctx context.Context, rawURL string, sourceItemI
 	sum := sha256.Sum256(body)
 	hash := hex.EncodeToString(sum[:])
 	ext := mediaExtension(rawURL, contentType, detectedType)
-	dir := filepath.Join(s.store.DataDir(), "media", "f95zone", "images", hash[:2])
+	dir := filepath.Join(s.store.DataDir(), "media", mediaSourceName(rawURL), "images", hash[:2])
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return domain.MediaAsset{}, err
 	}
@@ -1472,6 +1579,37 @@ func (s *Server) cacheMediaAsset(ctx context.Context, rawURL string, sourceItemI
 		OriginalURL:  rawURL,
 		Hash:         hash,
 	})
+}
+
+func (s *Server) fetchMediaBytes(ctx context.Context, rawURL string, proxyURL string, authProfile *domain.AuthProfile) ([]byte, string, error) {
+	if telegramsource.IsMediaURL(rawURL) {
+		return telegramsource.DownloadMedia(ctx, s.store.DataDir(), telegramsource.Config{}, rawURL)
+	}
+	return fetchBytesWithPolicy(ctx, rawURL, proxyURL, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", maxMediaBytes, authProfile, fetchPolicy{
+		NoTotalTimeout:        true,
+		ResponseHeaderTimeout: mediaResponseHeaderWait,
+		BodyIdleTimeout:       mediaBodyIdleTimeout,
+		Attempts:              mediaFetchAttempts,
+		Backoff:               []time.Duration{1 * time.Second, 3 * time.Second},
+	})
+}
+
+func mediaSourceName(rawURL string) string {
+	if telegramsource.IsMediaURL(rawURL) {
+		return "telegram"
+	}
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Host != "" {
+		host := strings.TrimPrefix(strings.ToLower(parsed.Host), "www.")
+		if host != "" {
+			return strings.Map(func(r rune) rune {
+				if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+					return r
+				}
+				return '-'
+			}, host)
+		}
+	}
+	return "remote"
 }
 
 func (s *Server) reusableMediaAsset(ctx context.Context, rawURL string, sourceItemID *int64) (domain.MediaAsset, bool) {

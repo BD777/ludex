@@ -36,14 +36,23 @@ func Open(dataDir string) (*Store, error) {
 		return nil, err
 	}
 	dbPath := defaultDatabasePath(dataDir)
-	db, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=on&_busy_timeout=5000")
+	db, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=on&_busy_timeout=10000")
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
+	if _, err := db.Exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=10000;"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	store := &Store{db: db, dataDir: dataDir}
 	if err := store.migrate(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := store.deduplicateGamesByTitle(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -312,6 +321,196 @@ WHERE id = ?`,
 	return s.GetGame(ctx, id)
 }
 
+type gameDedupeCandidate struct {
+	Game        domain.Game
+	SourceCount int
+}
+
+func (s *Store) deduplicateGamesByTitle(ctx context.Context) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT g.id, g.title, g.aliases_json, g.description, g.current_version, g.cover_image, g.created_at, g.updated_at,
+	COALESCE((SELECT COUNT(*) FROM source_items si WHERE si.matched_game_id = g.id), 0) AS source_count
+FROM games g
+ORDER BY g.updated_at DESC, g.id DESC`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	groups := map[string][]gameDedupeCandidate{}
+	for rows.Next() {
+		var candidate gameDedupeCandidate
+		var aliasesJSON string
+		if err := rows.Scan(
+			&candidate.Game.ID,
+			&candidate.Game.Title,
+			&aliasesJSON,
+			&candidate.Game.Description,
+			&candidate.Game.CurrentVersion,
+			&candidate.Game.CoverImage,
+			&candidate.Game.CreatedAt,
+			&candidate.Game.UpdatedAt,
+			&candidate.SourceCount,
+		); err != nil {
+			return 0, err
+		}
+		if aliasesJSON != "" {
+			if err := json.Unmarshal([]byte(aliasesJSON), &candidate.Game.Aliases); err != nil {
+				return 0, fmt.Errorf("decode aliases: %w", err)
+			}
+		}
+		if candidate.Game.Aliases == nil {
+			candidate.Game.Aliases = []string{}
+		}
+		key := gameTitleDedupeKey(candidate.Game.Title)
+		if key != "" {
+			groups[key] = append(groups[key], candidate)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	totalDuplicates := 0
+	for _, group := range groups {
+		if len(group) > 1 {
+			totalDuplicates += len(group) - 1
+		}
+	}
+	if totalDuplicates == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	removed := 0
+	for _, group := range groups {
+		if len(group) < 2 {
+			continue
+		}
+		count, err := mergeDuplicateGameGroup(ctx, tx, group)
+		if err != nil {
+			return 0, err
+		}
+		removed += count
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
+func mergeDuplicateGameGroup(ctx context.Context, tx *sql.Tx, group []gameDedupeCandidate) (int, error) {
+	keep := group[0]
+	for _, candidate := range group[1:] {
+		if betterGameDedupeCandidate(candidate, keep) {
+			keep = candidate
+		}
+	}
+
+	merged := keep.Game
+	for _, candidate := range group {
+		game := candidate.Game
+		if game.ID == keep.Game.ID {
+			continue
+		}
+		merged.Aliases = appendGameAlias(merged.Aliases, game.Title, merged.Title)
+		for _, alias := range game.Aliases {
+			merged.Aliases = appendGameAlias(merged.Aliases, alias, merged.Title)
+		}
+		if merged.Description == "" {
+			merged.Description = game.Description
+		}
+		if merged.CurrentVersion == "" {
+			merged.CurrentVersion = game.CurrentVersion
+		}
+		if merged.CoverImage == "" {
+			merged.CoverImage = game.CoverImage
+		}
+	}
+
+	aliases, err := json.Marshal(merged.Aliases)
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE games
+SET aliases_json = ?, description = ?, current_version = ?, cover_image = ?, updated_at = ?
+WHERE id = ?`,
+		string(aliases),
+		merged.Description,
+		merged.CurrentVersion,
+		merged.CoverImage,
+		now,
+		keep.Game.ID,
+	); err != nil {
+		return 0, err
+	}
+
+	removed := 0
+	for _, candidate := range group {
+		if candidate.Game.ID == keep.Game.ID {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE source_items
+SET matched_game_id = ?, status = 'matched', updated_at = ?
+WHERE matched_game_id = ?`,
+			keep.Game.ID,
+			now,
+			candidate.Game.ID,
+		); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE media_assets
+SET game_id = ?
+WHERE game_id = ?`,
+			keep.Game.ID,
+			candidate.Game.ID,
+		); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM games WHERE id = ?", candidate.Game.ID); err != nil {
+			return 0, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+func betterGameDedupeCandidate(candidate gameDedupeCandidate, current gameDedupeCandidate) bool {
+	if candidate.SourceCount != current.SourceCount {
+		return candidate.SourceCount > current.SourceCount
+	}
+	if candidate.Game.UpdatedAt != current.Game.UpdatedAt {
+		return candidate.Game.UpdatedAt > current.Game.UpdatedAt
+	}
+	return candidate.Game.ID > current.Game.ID
+}
+
+func gameTitleDedupeKey(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(value))), " ")
+}
+
+func appendGameAlias(aliases []string, alias string, title string) []string {
+	alias = strings.TrimSpace(alias)
+	if alias == "" || strings.EqualFold(alias, title) {
+		return aliases
+	}
+	for _, existing := range aliases {
+		if strings.EqualFold(existing, alias) {
+			return aliases
+		}
+	}
+	return append(aliases, alias)
+}
+
 func (s *Store) DeleteGame(ctx context.Context, id int64) ([]string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -550,6 +749,9 @@ func (s *Store) DeleteSourceItem(ctx context.Context, id int64) ([]string, error
 SELECT raw_content_path
 FROM source_items
 WHERE id = ?`, id).Scan(&rawPath); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return []string{}, nil
+		}
 		return nil, err
 	}
 	paths, err := queryStrings(ctx, tx, `

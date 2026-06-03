@@ -1,12 +1,15 @@
 package telegramsource
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -67,11 +70,22 @@ type Source struct {
 }
 
 type Message struct {
-	PeerID string `json:"peer_id"`
-	ID     int    `json:"id"`
-	Text   string `json:"text"`
-	Date   string `json:"date"`
-	URL    string `json:"url"`
+	PeerID    string  `json:"peer_id"`
+	ID        int     `json:"id"`
+	Text      string  `json:"text"`
+	Date      string  `json:"date"`
+	URL       string  `json:"url"`
+	GroupedID int64   `json:"grouped_id,omitempty"`
+	Media     []Media `json:"media,omitempty"`
+}
+
+type Media struct {
+	ID        string `json:"id"`
+	URL       string `json:"url"`
+	Kind      string `json:"kind"`
+	MIMEType  string `json:"mime_type"`
+	MessageID int    `json:"message_id"`
+	Position  int    `json:"position"`
 }
 
 type MessageQuery struct {
@@ -95,6 +109,21 @@ type SourceConfig struct {
 	AccessHash string `json:"access_hash"`
 	SourceURL  string `json:"source_url"`
 }
+
+type mediaRequest struct {
+	Config    SourceConfig
+	MessageID int
+	Position  int
+}
+
+type mediaFile struct {
+	MessageID int
+	Name      string
+	MIMEType  string
+	Location  tg.InputFileLocationClass
+}
+
+const telegramAlbumMessageWindow = 12
 
 type pendingCode struct {
 	Phone         string `json:"phone"`
@@ -258,8 +287,12 @@ func ListDialogs(ctx context.Context, dataDir string, input Config, limit int) (
 		if err != nil {
 			return err
 		}
+		if response == nil {
+			dialogs = []Dialog{}
+			return nil
+		}
 		modified, ok := response.AsModified()
-		if !ok {
+		if !ok || modified == nil {
 			dialogs = []Dialog{}
 			return nil
 		}
@@ -324,8 +357,12 @@ func ListMessages(ctx context.Context, dataDir string, input Config, source Sour
 		if err != nil {
 			return err
 		}
+		if response == nil {
+			page.Messages = []Message{}
+			return nil
+		}
 		modified, ok := response.AsModified()
-		if !ok {
+		if !ok || modified == nil {
 			page.Messages = []Message{}
 			return nil
 		}
@@ -371,41 +408,81 @@ func GetMessage(ctx context.Context, dataDir string, input Config, source Source
 			return errors.New("telegram account is not authorized")
 		}
 
-		inputMessage := []tg.InputMessageClass{&tg.InputMessageID{ID: messageID}}
-		var response tg.MessagesMessagesClass
-		switch sourceConfig.Type {
-		case "channel", "supergroup":
-			channel, err := inputChannelFromSource(sourceConfig)
-			if err != nil {
-				return err
-			}
-			response, err = client.API().ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
-				Channel: channel,
-				ID:      inputMessage,
-			})
-		default:
-			response, err = client.API().MessagesGetMessages(ctx, inputMessage)
-		}
+		messages, err := getTGMessagesByIDs(ctx, client, sourceConfig, []int{messageID})
 		if err != nil {
 			return err
 		}
-		modified, ok := response.AsModified()
-		if !ok {
-			return errors.New("telegram did not return the requested message")
-		}
-		messages := messagesFromClasses(sourceConfig, modified.GetMessages())
+		var selected *tg.Message
 		for _, message := range messages {
 			if message.ID == messageID {
-				found = message
-				return nil
+				selected = message
+				break
 			}
 		}
-		return errors.New("telegram message was not found")
+		if selected == nil {
+			return errors.New("telegram message was not found")
+		}
+		relatedMessages, err := telegramRelatedMediaMessages(ctx, client, sourceConfig, selected)
+		if err != nil {
+			return err
+		}
+		found, _ = messageFromTG(sourceConfig, selected, true)
+		found.Media = mediaDescriptorsFromMessages(sourceConfig, selected.ID, relatedMessages)
+		return nil
 	})
 	if err != nil {
 		return Message{}, err
 	}
 	return found, nil
+}
+
+func DownloadMedia(ctx context.Context, dataDir string, input Config, rawURL string) ([]byte, string, error) {
+	request, err := parseMediaURL(rawURL)
+	if err != nil {
+		return nil, "", err
+	}
+	cfg, err := ResolveConfig(dataDir, input)
+	if err != nil {
+		return nil, "", err
+	}
+	if !cfg.Configured() {
+		return nil, "", errors.New("telegram api_id and api_hash are required")
+	}
+
+	var body bytes.Buffer
+	var contentType string
+	err = withClient(ctx, dataDir, cfg, func(ctx context.Context, client *gotdtelegram.Client) error {
+		authStatus, err := client.Auth().Status(ctx)
+		if err != nil {
+			return err
+		}
+		if !authStatus.Authorized {
+			return errors.New("telegram account is not authorized")
+		}
+		files, err := mediaFilesForRootMessage(ctx, client, request.Config, request.MessageID)
+		if err != nil {
+			return err
+		}
+		if request.Position < 0 || request.Position >= len(files) {
+			return fmt.Errorf("telegram media position %d is unavailable", request.Position)
+		}
+		file := files[request.Position]
+		if file.MIMEType == "" {
+			file.MIMEType = "image/jpeg"
+		}
+		contentType = file.MIMEType
+		_, err = client.Download(file.Location).Stream(ctx, &body)
+		return err
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return body.Bytes(), contentType, nil
+}
+
+func IsMediaURL(rawURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	return err == nil && parsed.Scheme == "telegram" && parsed.Host == "media"
 }
 
 func ParseSourceConfig(raw string) (SourceConfig, error) {
@@ -493,28 +570,386 @@ func inputChannelFromSource(cfg SourceConfig) (tg.InputChannelClass, error) {
 }
 
 func messagesFromClasses(cfg SourceConfig, classes []tg.MessageClass) []Message {
-	messages := make([]Message, 0, len(classes))
-	for _, messageClass := range classes {
-		message, ok := messageClass.(*tg.Message)
+	tgMessages := tgMessagesFromClasses(classes)
+	messages := make([]Message, 0, len(tgMessages))
+	for _, message := range tgMessages {
+		next, ok := messageFromTG(cfg, message, false)
 		if !ok {
 			continue
 		}
-		text := strings.TrimSpace(message.GetMessage())
-		if text == "" {
-			continue
-		}
-		next := Message{
-			PeerID: cfg.PeerID,
-			ID:     message.GetID(),
-			Text:   text,
-			URL:    messageURL(cfg, message.GetID()),
-		}
-		if date := message.GetDate(); date > 0 {
-			next.Date = time.Unix(int64(date), 0).UTC().Format(time.RFC3339)
+		if len(next.Media) == 0 {
+			next.Media = mediaDescriptorsFromMessages(cfg, message.ID, relatedMediaMessagesFromPool(message, tgMessages))
 		}
 		messages = append(messages, next)
 	}
 	return messages
+}
+
+func tgMessagesFromClasses(classes []tg.MessageClass) []*tg.Message {
+	messages := make([]*tg.Message, 0, len(classes))
+	for _, messageClass := range classes {
+		message, ok := messageClass.(*tg.Message)
+		if !ok || message == nil {
+			continue
+		}
+		messages = append(messages, message)
+	}
+	return sortedTGMessages(messages)
+}
+
+func messageFromTG(cfg SourceConfig, message *tg.Message, includeEmptyText bool) (Message, bool) {
+	if message == nil {
+		return Message{}, false
+	}
+	text := strings.TrimSpace(message.GetMessage())
+	if text == "" && !includeEmptyText {
+		return Message{}, false
+	}
+	next := Message{
+		PeerID: cfg.PeerID,
+		ID:     message.GetID(),
+		Text:   text,
+		URL:    messageURL(cfg, message.GetID()),
+		Media:  mediaDescriptorsFromMessages(cfg, message.GetID(), []*tg.Message{message}),
+	}
+	if groupedID, ok := message.GetGroupedID(); ok {
+		next.GroupedID = groupedID
+	}
+	if date := message.GetDate(); date > 0 {
+		next.Date = time.Unix(int64(date), 0).UTC().Format(time.RFC3339)
+	}
+	return next, true
+}
+
+func telegramRelatedMediaMessages(ctx context.Context, client *gotdtelegram.Client, cfg SourceConfig, selected *tg.Message) ([]*tg.Message, error) {
+	if selected == nil {
+		return nil, errors.New("telegram message was not found")
+	}
+	groupedID, ok := selected.GetGroupedID()
+	if !ok || groupedID == 0 {
+		return []*tg.Message{selected}, nil
+	}
+	ids := make([]int, 0, telegramAlbumMessageWindow*2+1)
+	for id := selected.ID - telegramAlbumMessageWindow; id <= selected.ID+telegramAlbumMessageWindow; id++ {
+		if id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	messages, err := getTGMessagesByIDs(ctx, client, cfg, ids)
+	if err != nil {
+		return nil, err
+	}
+	album := make([]*tg.Message, 0, len(messages))
+	for _, message := range messages {
+		if message == nil {
+			continue
+		}
+		if candidateGroupedID, ok := message.GetGroupedID(); ok && candidateGroupedID == groupedID {
+			album = append(album, message)
+		}
+	}
+	if len(album) > 0 {
+		return sortedTGMessages(album), nil
+	}
+	return []*tg.Message{selected}, nil
+}
+
+func relatedMediaMessagesFromPool(selected *tg.Message, messages []*tg.Message) []*tg.Message {
+	if selected == nil {
+		return nil
+	}
+	if groupedID, ok := selected.GetGroupedID(); ok && groupedID != 0 {
+		grouped := make([]*tg.Message, 0, len(messages))
+		for _, message := range messages {
+			if message == nil {
+				continue
+			}
+			if candidateGroupedID, ok := message.GetGroupedID(); ok && candidateGroupedID == groupedID {
+				grouped = append(grouped, message)
+			}
+		}
+		if len(grouped) > 0 {
+			return sortedTGMessages(grouped)
+		}
+	}
+	return []*tg.Message{selected}
+}
+
+func getTGMessagesByIDs(ctx context.Context, client *gotdtelegram.Client, cfg SourceConfig, ids []int) ([]*tg.Message, error) {
+	inputMessages := make([]tg.InputMessageClass, 0, len(ids))
+	seen := map[int]struct{}{}
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		inputMessages = append(inputMessages, &tg.InputMessageID{ID: id})
+	}
+	if len(inputMessages) == 0 {
+		return nil, errors.New("telegram message_id is required")
+	}
+
+	var response tg.MessagesMessagesClass
+	var err error
+	switch cfg.Type {
+	case "channel", "supergroup":
+		channel, err := inputChannelFromSource(cfg)
+		if err != nil {
+			return nil, err
+		}
+		response, err = client.API().ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+			Channel: channel,
+			ID:      inputMessages,
+		})
+	default:
+		response, err = client.API().MessagesGetMessages(ctx, inputMessages)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if response == nil {
+		return nil, errors.New("telegram did not return the requested message")
+	}
+	modified, ok := response.AsModified()
+	if !ok || modified == nil {
+		return nil, errors.New("telegram did not return the requested message")
+	}
+	messages := make([]*tg.Message, 0, len(modified.GetMessages()))
+	for _, messageClass := range modified.GetMessages() {
+		message, ok := messageClass.(*tg.Message)
+		if ok && message != nil {
+			messages = append(messages, message)
+		}
+	}
+	return sortedTGMessages(messages), nil
+}
+
+func sortedTGMessages(messages []*tg.Message) []*tg.Message {
+	messages = compactTGMessages(messages)
+	sort.SliceStable(messages, func(i, j int) bool {
+		return messages[i].ID < messages[j].ID
+	})
+	return messages
+}
+
+func compactTGMessages(messages []*tg.Message) []*tg.Message {
+	compact := messages[:0]
+	for _, message := range messages {
+		if message != nil {
+			compact = append(compact, message)
+		}
+	}
+	return compact
+}
+
+func mediaDescriptorsFromMessages(cfg SourceConfig, rootMessageID int, messages []*tg.Message) []Media {
+	files := mediaFilesFromMessages(messages)
+	media := make([]Media, 0, len(files))
+	for index, file := range files {
+		media = append(media, Media{
+			ID:        fmt.Sprintf("%d:%d", rootMessageID, index),
+			URL:       telegramMediaURL(cfg, rootMessageID, index),
+			Kind:      "image",
+			MIMEType:  firstNonEmpty(file.MIMEType, "image/jpeg"),
+			MessageID: file.MessageID,
+			Position:  index,
+		})
+	}
+	return media
+}
+
+func mediaFilesForRootMessage(ctx context.Context, client *gotdtelegram.Client, cfg SourceConfig, messageID int) ([]mediaFile, error) {
+	messages, err := getTGMessagesByIDs(ctx, client, cfg, []int{messageID})
+	if err != nil {
+		return nil, err
+	}
+	var selected *tg.Message
+	for _, message := range messages {
+		if message.ID == messageID {
+			selected = message
+			break
+		}
+	}
+	if selected == nil {
+		return nil, errors.New("telegram message was not found")
+	}
+	related, err := telegramRelatedMediaMessages(ctx, client, cfg, selected)
+	if err != nil {
+		return nil, err
+	}
+	files := mediaFilesFromMessages(related)
+	if len(files) == 0 {
+		return nil, errors.New("telegram message has no downloadable image media")
+	}
+	return files, nil
+}
+
+func mediaFilesFromMessages(messages []*tg.Message) []mediaFile {
+	messages = sortedTGMessages(append([]*tg.Message{}, messages...))
+	files := make([]mediaFile, 0, len(messages))
+	for _, message := range messages {
+		if message == nil {
+			continue
+		}
+		file, ok := imageFileFromMessage(message)
+		if ok {
+			files = append(files, file)
+		}
+	}
+	return files
+}
+
+type sizedPhoto interface {
+	GetW() int
+	GetH() int
+	GetType() string
+}
+
+func imageFileFromMessage(message *tg.Message) (mediaFile, bool) {
+	if message == nil || message.Media == nil {
+		return mediaFile{}, false
+	}
+	switch media := message.Media.(type) {
+	case *tg.MessageMediaPhoto:
+		photo, ok := media.Photo.AsNotEmpty()
+		if !ok {
+			return mediaFile{}, false
+		}
+		thumbSize := largestPhotoThumbSize(photo.Sizes)
+		if thumbSize == "" {
+			return mediaFile{}, false
+		}
+		return mediaFile{
+			MessageID: message.ID,
+			Name:      fmt.Sprintf("telegram-photo-%d.jpg", photo.ID),
+			MIMEType:  "image/jpeg",
+			Location: &tg.InputPhotoFileLocation{
+				ID:            photo.ID,
+				AccessHash:    photo.AccessHash,
+				FileReference: photo.FileReference,
+				ThumbSize:     thumbSize,
+			},
+		}, true
+	case *tg.MessageMediaDocument:
+		doc, ok := media.Document.AsNotEmpty()
+		if !ok || !documentIsImage(doc) {
+			return mediaFile{}, false
+		}
+		return mediaFile{
+			MessageID: message.ID,
+			Name:      documentFileName(doc),
+			MIMEType:  firstNonEmpty(doc.MimeType, "image/jpeg"),
+			Location:  doc.AsInputDocumentFileLocation(),
+		}, true
+	default:
+		return mediaFile{}, false
+	}
+}
+
+func largestPhotoThumbSize(sizes []tg.PhotoSizeClass) string {
+	bestType := ""
+	bestArea := 0
+	for _, size := range sizes {
+		sized, ok := size.(sizedPhoto)
+		if !ok {
+			continue
+		}
+		area := sized.GetW() * sized.GetH()
+		if area > bestArea {
+			bestArea = area
+			bestType = sized.GetType()
+		}
+	}
+	return bestType
+}
+
+func documentIsImage(doc *tg.Document) bool {
+	if strings.HasPrefix(strings.ToLower(doc.MimeType), "image/") {
+		return true
+	}
+	for _, attr := range doc.Attributes {
+		if _, ok := attr.(*tg.DocumentAttributeImageSize); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func documentFileName(doc *tg.Document) string {
+	for _, attr := range doc.Attributes {
+		if filename, ok := attr.(*tg.DocumentAttributeFilename); ok && strings.TrimSpace(filename.FileName) != "" {
+			return filename.FileName
+		}
+	}
+	ext := ".jpg"
+	switch strings.ToLower(doc.MimeType) {
+	case "image/png":
+		ext = ".png"
+	case "image/webp":
+		ext = ".webp"
+	case "image/gif":
+		ext = ".gif"
+	}
+	return fmt.Sprintf("telegram-document-%d%s", doc.ID, ext)
+}
+
+func telegramMediaURL(cfg SourceConfig, messageID int, position int) string {
+	values := url.Values{}
+	values.Set("type", cfg.Type)
+	values.Set("peer_id", cfg.PeerID)
+	values.Set("message_id", strconv.Itoa(messageID))
+	values.Set("position", strconv.Itoa(position))
+	values.Set("resolver", "direct-v2")
+	if cfg.AccessHash != "" {
+		values.Set("access_hash", cfg.AccessHash)
+	}
+	if cfg.Username != "" {
+		values.Set("username", cfg.Username)
+	}
+	if cfg.SourceURL != "" {
+		values.Set("source_url", cfg.SourceURL)
+	}
+	return "telegram://media?" + values.Encode()
+}
+
+func parseMediaURL(rawURL string) (mediaRequest, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return mediaRequest{}, err
+	}
+	if parsed.Scheme != "telegram" || parsed.Host != "media" {
+		return mediaRequest{}, fmt.Errorf("unsupported telegram media URL %q", rawURL)
+	}
+	values := parsed.Query()
+	messageID, err := strconv.Atoi(values.Get("message_id"))
+	if err != nil || messageID <= 0 {
+		return mediaRequest{}, errors.New("telegram media URL is missing message_id")
+	}
+	position := 0
+	if rawPosition := strings.TrimSpace(values.Get("position")); rawPosition != "" {
+		position, err = strconv.Atoi(rawPosition)
+		if err != nil || position < 0 {
+			return mediaRequest{}, errors.New("telegram media URL has invalid position")
+		}
+	}
+	cfg := SourceConfig{
+		Type:       values.Get("type"),
+		PeerID:     values.Get("peer_id"),
+		AccessHash: values.Get("access_hash"),
+		Username:   values.Get("username"),
+		SourceURL:  values.Get("source_url"),
+	}
+	if strings.TrimSpace(cfg.PeerID) == "" {
+		return mediaRequest{}, errors.New("telegram media URL is missing peer_id")
+	}
+	return mediaRequest{
+		Config:    cfg,
+		MessageID: messageID,
+		Position:  position,
+	}, nil
 }
 
 func nextOffsetID(messages []Message) int {

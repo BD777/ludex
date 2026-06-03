@@ -32,7 +32,9 @@ type importTelegramResult struct {
 
 var (
 	telegramKeyValueRE       = regexp.MustCompile(`^\s*([^:：\n]{1,36})\s*[:：]\s*(.+?)\s*$`)
-	telegramVersionRE        = regexp.MustCompile(`(?i)(?:version|ver\.?|版本)?\s*\b(v[0-9][0-9A-Za-z._-]*)\b`)
+	telegramInlineVersionRE  = regexp.MustCompile(`(?i)\b(v\d+(?:[._-]\d+)*(?:[a-z]\d*)?)\b`)
+	telegramLabeledVersionRE = regexp.MustCompile(`(?i)^\s*(?:version|ver\.?|版本)\s*[:：]?\s*(v?\d+(?:[._-]\d+)*(?:[a-z]\d*)?)\b`)
+	telegramVersionValueRE   = regexp.MustCompile(`(?i)^\s*(v?\d+(?:[._-]\d+)*(?:[a-z]\d*)?)\b`)
 	telegramURLRE            = regexp.MustCompile(`https?://[^\s<>"'）)]+`)
 	telegramHashSegmentRE    = regexp.MustCompile(`#([^#\n]+)`)
 	telegramSectionHeadingRE = regexp.MustCompile(`^\s*[·・•]+\s*(.+?)\s*[·・•]+\s*$`)
@@ -83,7 +85,10 @@ func (s *Server) browseTelegram(ctx context.Context, req browseAdapterRequest, c
 			return domain.AdapterBrowsePage{}, err
 		}
 		for _, message := range messagePage.Messages {
-			page.Items = append(page.Items, telegramAdapterListItem(source, message))
+			item, ok := telegramAdapterListItem(source, message)
+			if ok {
+				page.Items = append(page.Items, item)
+			}
 		}
 		if messagePage.NextOffsetID > 0 && (nextOffsetID == 0 || messagePage.NextOffsetID < nextOffsetID) {
 			nextOffsetID = messagePage.NextOffsetID
@@ -105,7 +110,7 @@ func (s *Server) browseTelegram(ctx context.Context, req browseAdapterRequest, c
 		page.NextURL = telegramBrowseURL(sourceIDs, search, nextOffsetID)
 	}
 	if len(page.Items) == 0 {
-		page.Warnings = append(page.Warnings, "No Telegram messages matched this request.")
+		page.Warnings = append(page.Warnings, "No Telegram game posts with both a recognized title and cover matched this request.")
 	}
 	return page, nil
 }
@@ -203,23 +208,28 @@ func (s *Server) executeTelegramImport(ctx context.Context, req importTelegramRe
 	if source.Type != "telegram" {
 		return importTelegramResult{}, fmt.Errorf("source #%d is %q, not telegram", source.ID, source.Type)
 	}
-	report(1, 5, "Fetching Telegram message")
+	report(1, 6, "Fetching Telegram message")
 	message, err := telegramsource.GetMessage(ctx, s.store.DataDir(), telegramsource.Config{}, telegramSourceFromDomain(source), req.MessageID)
 	if err != nil {
 		return importTelegramResult{}, err
 	}
-	report(2, 5, "Parsing Telegram message")
+	if !telegramRecognizedMessage(message) {
+		return importTelegramResult{}, errors.New("Telegram message is not a recognizable game post with both title and cover")
+	}
+	mediaCount := minInt(len(message.Media), maxCachedImages)
+	total := 6 + mediaCount
+	report(2, total, "Parsing Telegram message")
 	transcript := telegramTranscript(source, message)
 	parsed, err := structToMap(transcript)
 	if err != nil {
 		return importTelegramResult{}, err
 	}
-	report(3, 5, "Saving raw message")
+	report(3, total, "Saving raw message")
 	rawPath, err := s.saveRawContent("telegram", firstNonEmpty(message.URL, source.URL), []byte(message.Text))
 	if err != nil {
 		return importTelegramResult{}, err
 	}
-	report(4, 5, "Saving source item")
+	report(4, total, "Saving source item")
 	item, _, err := s.store.UpsertSourceItemByAdapterKey(ctx, domain.SourceItem{
 		SourceID:       &source.ID,
 		SourceType:     "telegram",
@@ -235,9 +245,21 @@ func (s *Server) executeTelegramImport(ctx context.Context, req importTelegramRe
 	if err != nil {
 		return importTelegramResult{}, err
 	}
+	if len(transcript.Images) > 0 {
+		transcript = s.cacheTranscriptMedia(ctx, transcript, item.ID, "", nil, report, 5, total)
+		parsed, err = structToMap(transcript)
+		if err != nil {
+			return importTelegramResult{}, err
+		}
+		item, err = s.store.UpdateSourceItemParsedJSON(ctx, item.ID, parsed)
+		if err != nil {
+			return importTelegramResult{}, err
+		}
+	}
 
 	var game *domain.Game
 	if req.CreateGame {
+		report(total-1, total, "Saving game record")
 		created, err := s.saveGameFromTranscript(ctx, transcript, item.MatchedGameID)
 		if err != nil {
 			return importTelegramResult{}, err
@@ -246,9 +268,12 @@ func (s *Server) executeTelegramImport(ctx context.Context, req importTelegramRe
 		if err != nil {
 			return importTelegramResult{}, err
 		}
+		if err := s.store.SetMediaAssetsGameForSourceItem(ctx, item.ID, created.ID); err != nil {
+			return importTelegramResult{}, err
+		}
 		game = &created
 	}
-	report(5, 5, "Import complete")
+	report(total, total, "Import complete")
 	return importTelegramResult{Item: item, Game: game, Transcript: transcript}, nil
 }
 
@@ -260,10 +285,11 @@ func telegramSourceFromDomain(source domain.Source) telegramsource.Source {
 	}
 }
 
-func telegramAdapterListItem(source domain.Source, message telegramsource.Message) domain.AdapterListItem {
-	title := telegramMessageTitle(message.Text)
-	if title == "" {
-		title = fmt.Sprintf("Message #%d", message.ID)
+func telegramAdapterListItem(source domain.Source, message telegramsource.Message) (domain.AdapterListItem, bool) {
+	title := telegramRecognizedTitle(message.Text)
+	cover := telegramFirstMediaURL(message)
+	if title == "" || cover == "" {
+		return domain.AdapterListItem{}, false
 	}
 	tags := telegramMessageTags(message.Text)
 	return domain.AdapterListItem{
@@ -273,17 +299,18 @@ func telegramAdapterListItem(source domain.Source, message telegramsource.Messag
 		URL:        firstNonEmpty(message.URL, source.URL),
 		Author:     source.Name,
 		Summary:    telegramMessagePreview(message.Text),
+		PreviewURL: cover,
 		LatestAt:   message.Date,
 		Prefixes:   tags,
 		Tags:       tags,
 		Importable: true,
-	}
+	}, true
 }
 
 func telegramTranscript(source domain.Source, message telegramsource.Message) domain.Transcript {
 	keyValues := telegramKeyValues(message.Text)
-	title := firstNonEmpty(telegramLabeledValue(keyValues, "game", "title", "name", "游戏", "游戏名", "名称", "标题"), telegramMessageTitle(message.Text))
-	version := firstNonEmpty(telegramLabeledValue(keyValues, "version", "ver", "版本"), telegramVersion(message.Text))
+	title := telegramRecognizedTitleFromKeyValues(message.Text, keyValues)
+	version := firstNonEmpty(telegramVersionFromValue(telegramLabeledValue(keyValues, "version", "ver", "版本")), telegramVersion(message.Text))
 	developer := telegramLabeledValue(keyValues, "developer", "author", "circle", "studio", "开发", "开发者", "作者", "社团", "制作")
 	sections := telegramSections(message.Text)
 	descriptionSection := telegramSectionBody(sections, "游戏介绍", "简介", "故事梗概", "剧情梗概", "story", "overview", "description")
@@ -296,6 +323,7 @@ func telegramTranscript(source domain.Source, message telegramsource.Message) do
 		description = telegramFallbackDescription(message.Text, title)
 	}
 	tags := telegramMessageTags(message.Text)
+	images := telegramMessageImages(message)
 	releaseDate, threadUpdated := telegramReleaseDates(message.Text)
 	fields := domain.TranscriptFields{
 		GameName:         title,
@@ -310,6 +338,12 @@ func telegramTranscript(source domain.Source, message telegramsource.Message) do
 		Changelog:        changelog,
 		DownloadGroups:   telegramDownloadGroups(message),
 	}
+	if len(images) > 0 {
+		fields.CoverImage = images[0]
+		if len(images) > 1 {
+			fields.Screenshots = append([]string{}, images[1:]...)
+		}
+	}
 	return domain.Transcript{
 		Source:     "telegram",
 		SourceURL:  firstNonEmpty(message.URL, source.URL),
@@ -318,12 +352,14 @@ func telegramTranscript(source domain.Source, message telegramsource.Message) do
 		Fields:     fields,
 		KeyValues:  keyValues,
 		Sections:   append(sections, domain.TranscriptSection{Heading: "Message", Body: strings.TrimSpace(message.Text)}),
+		Images:     images,
 		Tags:       tags,
 		Inferred: domain.TranscriptInferred{
 			GameTitle:   title,
 			Version:     version,
 			Developer:   developer,
 			Description: description,
+			CoverImage:  fields.CoverImage,
 		},
 		Warnings: telegramTranscriptWarnings(fields),
 	}
@@ -341,6 +377,35 @@ func telegramTranscriptWarnings(fields domain.TranscriptFields) []string {
 		warnings = append(warnings, "Telegram message link was not available for downloads.")
 	}
 	return warnings
+}
+
+func telegramRecognizedMessage(message telegramsource.Message) bool {
+	return telegramRecognizedTitle(message.Text) != "" && telegramFirstMediaURL(message) != ""
+}
+
+func telegramMessageImages(message telegramsource.Message) []string {
+	images := make([]string, 0, len(message.Media))
+	for _, media := range message.Media {
+		if strings.TrimSpace(media.URL) != "" {
+			images = append(images, media.URL)
+		}
+	}
+	return images
+}
+
+func telegramFirstMediaURL(message telegramsource.Message) string {
+	if len(message.Media) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(message.Media[0].URL)
+}
+
+func telegramRecognizedTitle(text string) string {
+	return telegramRecognizedTitleFromKeyValues(text, telegramKeyValues(text))
+}
+
+func telegramRecognizedTitleFromKeyValues(text string, keyValues map[string][]string) string {
+	return firstNonEmpty(telegramLabeledValue(keyValues, "game", "title", "name", "游戏", "游戏名", "名称", "标题"), telegramMessageTitle(text))
 }
 
 func telegramKeyValues(text string) map[string][]string {
@@ -400,7 +465,23 @@ func telegramMessageTitle(text string) string {
 }
 
 func telegramVersion(text string) string {
-	match := telegramVersionRE.FindStringSubmatch(text)
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if match := telegramLabeledVersionRE.FindStringSubmatch(line); len(match) == 2 {
+			return strings.TrimSpace(match[1])
+		}
+		if match := telegramInlineVersionRE.FindStringSubmatch(line); len(match) == 2 {
+			return strings.TrimSpace(match[1])
+		}
+	}
+	return ""
+}
+
+func telegramVersionFromValue(value string) string {
+	match := telegramVersionValueRE.FindStringSubmatch(strings.TrimSpace(value))
 	if len(match) == 2 {
 		return strings.TrimSpace(match[1])
 	}

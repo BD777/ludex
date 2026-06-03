@@ -297,11 +297,13 @@ type TranscriptFields = {
   screenshots?: string[];
 };
 
-type ViewName = "games" | "adapters" | "import" | "items" | "tasks";
+type ViewName = "games" | "adapters" | "import" | "review" | "tasks";
 
 type ImportMode = "browse" | "direct";
 
 type GamePanelMode = "detail" | "edit" | "new";
+
+type GameDetailTab = "details" | "sources";
 
 type CoverLoadState = "loading" | "loaded" | "failed";
 
@@ -344,11 +346,17 @@ const deleting = ref(false);
 const previewImage = ref("");
 const previewSequence = ref<string[]>([]);
 const gamePanelMode = ref<GamePanelMode>("detail");
+const selectedGameTab = ref<GameDetailTab>("details");
 const taskHistoryExpanded = ref(false);
 const matchEditing = ref(false);
+const savingGame = ref(false);
+const creatingGameItemId = ref<number | null>(null);
+const matchingItemId = ref<number | null>(null);
+const unlinkingItemId = ref<number | null>(null);
 const mediaRetrying = ref(false);
 const retryingMediaURL = ref("");
 const retryingTaskId = ref<number | null>(null);
+const sourceLinkOpen = ref(false);
 let noticeTimer: number | undefined;
 let errorTimer: number | undefined;
 
@@ -494,6 +502,10 @@ const fallbackAdapters: Adapter[] = [
 ];
 
 const matchGameId = ref("");
+const matchGameQuery = ref("");
+const matchPickerOpen = ref(false);
+const matchGameLimit = 30;
+let matchPickerCloseTimer: number | undefined;
 
 const filteredGames = computed(() => {
   const needle = query.value.trim().toLowerCase();
@@ -505,6 +517,22 @@ const filteredGames = computed(() => {
     );
   });
 });
+
+const unmatchedSourceItems = computed(() => {
+  return sourceItems.value
+    .filter((item) => !item.matched_game_id)
+    .sort(compareSourceItemsByUpdatedAt);
+});
+
+const reviewSourceItems = computed(() => {
+  const items = [...unmatchedSourceItems.value];
+  if (selectedItem.value && !items.some((item) => item.id === selectedItem.value?.id)) {
+    items.unshift(selectedItem.value);
+  }
+  return items;
+});
+
+const reviewItemCount = computed(() => unmatchedSourceItems.value.length);
 
 const selectedTranscript = computed(() => selectedItem.value?.parsed_json ?? {});
 
@@ -519,11 +547,7 @@ const selectedGameSourceItems = computed(() => {
   }
   return sourceItems.value
     .filter((item) => item.matched_game_id === selectedGame.value?.id)
-    .sort((left, right) => {
-      const leftTime = Date.parse(left.updated_at || left.fetched_at || left.created_at);
-      const rightTime = Date.parse(right.updated_at || right.fetched_at || right.created_at);
-      return rightTime - leftTime;
-    });
+    .sort(compareSourceItemsByUpdatedAt);
 });
 
 const selectedGameSourceItem = computed(() => selectedGameSourceItems.value[0] ?? null);
@@ -754,6 +778,29 @@ const availableMatchGames = computed(() => {
   return games.value.filter((game) => game.id !== currentID);
 });
 
+const selectedMatchGame = computed(() => {
+  const id = Number(matchGameId.value);
+  if (!Number.isFinite(id)) {
+    return null;
+  }
+  return availableMatchGames.value.find((game) => game.id === id) ?? null;
+});
+
+const matchingMatchGames = computed(() => {
+  const needle = matchGameQuery.value.trim().toLowerCase();
+  if (!needle) {
+    return availableMatchGames.value;
+  }
+  if (selectedMatchGame.value && needle === formatMatchGameOption(selectedMatchGame.value).toLowerCase()) {
+    return availableMatchGames.value;
+  }
+  return availableMatchGames.value.filter((game) => gameMatchesQuery(game, needle));
+});
+
+const limitedMatchGames = computed(() => matchingMatchGames.value.slice(0, matchGameLimit));
+
+const hiddenMatchGameCount = computed(() => Math.max(0, matchingMatchGames.value.length - limitedMatchGames.value.length));
+
 const canApplyMatch = computed(() => {
   if (!selectedItem.value || matchGameId.value === "") {
     return false;
@@ -830,13 +877,13 @@ async function loadLibrary() {
     const refreshedItem = nextItems.find((item) => item.id === selectedItem.value?.id) ?? null;
     selectedItem.value = refreshedItem;
     if (!refreshedItem) {
-      matchGameId.value = "";
+      resetMatchPicker();
       matchEditing.value = false;
     }
   }
-  if (!selectedItem.value && nextItems.length > 0) {
-    selectedItem.value = nextItems[0];
-    matchGameId.value = "";
+  if (!selectedItem.value && unmatchedSourceItems.value.length > 0) {
+    selectedItem.value = unmatchedSourceItems.value[0];
+    resetMatchPicker();
     matchEditing.value = false;
   }
 }
@@ -858,9 +905,35 @@ async function loadTasks() {
   }
 }
 
+function refreshLibraryInBackground() {
+  void loadLibrary().catch((err) => {
+    error.value = toMessage(err);
+  });
+}
+
+function upsertGameInState(game: Game) {
+  const index = games.value.findIndex((entry) => entry.id === game.id);
+  if (index >= 0) {
+    games.value = games.value.map((entry) => (entry.id === game.id ? game : entry));
+  } else {
+    games.value = [game, ...games.value];
+  }
+}
+
+function upsertSourceItemInState(item: SourceItem) {
+  const index = sourceItems.value.findIndex((entry) => entry.id === item.id);
+  if (index >= 0) {
+    sourceItems.value = sourceItems.value.map((entry) => (entry.id === item.id ? item : entry));
+  } else {
+    sourceItems.value = [item, ...sourceItems.value];
+  }
+}
+
 function newGame() {
   selectedGame.value = null;
   gamePanelMode.value = "new";
+  selectedGameTab.value = "details";
+  sourceLinkOpen.value = false;
   Object.assign(gameDraft, {
     id: 0,
     title: "",
@@ -886,6 +959,7 @@ function assignGameDraft(game: Game) {
 function selectGame(game: Game) {
   assignGameDraft(game);
   gamePanelMode.value = "detail";
+  sourceLinkOpen.value = false;
 }
 
 function editGame(game: Game) {
@@ -895,6 +969,7 @@ function editGame(game: Game) {
 
 function startGameEdit() {
   if (selectedGame.value) {
+    selectedGameTab.value = "details";
     editGame(selectedGame.value);
   }
 }
@@ -909,11 +984,16 @@ function cancelGameForm() {
     return;
   }
   gamePanelMode.value = "detail";
+  selectedGameTab.value = "details";
 }
 
 async function saveGame() {
+  if (savingGame.value) {
+    return;
+  }
   error.value = "";
   clearNotice();
+  savingGame.value = true;
   const payload = {
     title: gameDraft.title.trim(),
     aliases: gameDraft.aliases
@@ -935,10 +1015,13 @@ async function saveGame() {
           body: JSON.stringify(payload)
     });
     showNotice("Saved");
-    await loadAll();
+    upsertGameInState(saved);
     selectGame(saved);
+    refreshLibraryInBackground();
   } catch (err) {
     error.value = toMessage(err);
+  } finally {
+    savingGame.value = false;
   }
 }
 
@@ -1314,10 +1397,10 @@ async function saveTelegramDialog(dialog: TelegramDialog) {
 }
 
 function adapterBrowseCoverSrc(item: AdapterListItem) {
-  if (item.cover_image && !isExternalURL(item.cover_image)) {
+  if (item.cover_image && !isExternalURL(item.cover_image) && !item.cover_image.startsWith("telegram://")) {
     return item.cover_image;
   }
-  if (!item.preview_url || item.adapter_id !== "f95zone") {
+  if (!item.preview_url || !["f95zone", "telegram"].includes(item.adapter_id)) {
     return "";
   }
   const params = new URLSearchParams({ preview_url: item.preview_url });
@@ -1382,19 +1465,28 @@ function isExternalURL(value: string) {
 }
 
 async function createGameFromItem(item: SourceItem) {
+  if (creatingGameItemId.value === item.id) {
+    return;
+  }
   error.value = "";
   clearNotice();
+  creatingGameItemId.value = item.id;
   try {
     const result = await api<{ game: Game; item: SourceItem }>(
       `/api/source-items/${item.id}/create-game`,
       { method: "POST", body: "{}" }
     );
-    showNotice("Game created");
-    await loadAll();
+    upsertGameInState(result.game);
+    upsertSourceItemInState(result.item);
     selectedItem.value = result.item;
     selectGame(result.game);
+    view.value = "games";
+    showNotice("Game created");
+    refreshLibraryInBackground();
   } catch (err) {
     error.value = toMessage(err);
+  } finally {
+    creatingGameItemId.value = null;
   }
 }
 
@@ -1402,22 +1494,66 @@ async function matchItem(item: SourceItem) {
   if (!canApplyMatch.value) {
     return;
   }
-  error.value = "";
-  clearNotice();
   const gameId = Number(matchGameId.value);
   const wasMatched = Boolean(item.matched_game_id);
+  await matchSourceItemToGame(item, gameId, wasMatched ? "Match updated" : "Matched");
+}
+
+async function matchSourceItemToGame(item: SourceItem, gameId: number, message = "Matched") {
+  if (matchingItemId.value === item.id) {
+    return;
+  }
+  error.value = "";
+  clearNotice();
+  matchingItemId.value = item.id;
   try {
     const updated = await api<SourceItem>(`/api/source-items/${item.id}/match`, {
       method: "POST",
       body: JSON.stringify({ game_id: gameId })
     });
+    upsertSourceItemInState(updated);
     selectedItem.value = updated;
-    matchGameId.value = "";
+    resetMatchPicker();
     matchEditing.value = false;
-    showNotice(wasMatched ? "Match updated" : "Matched");
-    await loadAll();
+    showNotice(message);
+    refreshLibraryInBackground();
   } catch (err) {
     error.value = toMessage(err);
+  } finally {
+    matchingItemId.value = null;
+  }
+}
+
+async function linkSourceItemToSelectedGame(item: SourceItem) {
+  if (!selectedGame.value) {
+    return;
+  }
+  await matchSourceItemToGame(item, selectedGame.value.id, "Source linked");
+  selectedGameTab.value = "sources";
+}
+
+async function unlinkSourceItem(item: SourceItem) {
+  if (unlinkingItemId.value === item.id) {
+    return;
+  }
+  error.value = "";
+  clearNotice();
+  unlinkingItemId.value = item.id;
+  try {
+    const updated = await api<SourceItem>(`/api/source-items/${item.id}/match`, {
+      method: "POST",
+      body: JSON.stringify({ game_id: null })
+    });
+    upsertSourceItemInState(updated);
+    if (selectedItem.value?.id === item.id) {
+      selectedItem.value = updated;
+    }
+    showNotice("Source unlinked");
+    refreshLibraryInBackground();
+  } catch (err) {
+    error.value = toMessage(err);
+  } finally {
+    unlinkingItemId.value = null;
   }
 }
 
@@ -1499,14 +1635,72 @@ function openMatchedGame() {
   view.value = "games";
 }
 
+function resetMatchPicker() {
+  matchGameId.value = "";
+  matchGameQuery.value = "";
+  matchPickerOpen.value = false;
+  if (matchPickerCloseTimer !== undefined) {
+    window.clearTimeout(matchPickerCloseTimer);
+    matchPickerCloseTimer = undefined;
+  }
+}
+
+function openMatchPicker() {
+  if (matchPickerCloseTimer !== undefined) {
+    window.clearTimeout(matchPickerCloseTimer);
+    matchPickerCloseTimer = undefined;
+  }
+  matchPickerOpen.value = true;
+}
+
+function closeMatchPickerSoon() {
+  if (matchPickerCloseTimer !== undefined) {
+    window.clearTimeout(matchPickerCloseTimer);
+  }
+  matchPickerCloseTimer = window.setTimeout(() => {
+    matchPickerOpen.value = false;
+    matchPickerCloseTimer = undefined;
+  }, 120);
+}
+
+function selectMatchGame(game: Game) {
+  matchGameId.value = String(game.id);
+  matchGameQuery.value = formatMatchGameOption(game);
+  matchPickerOpen.value = false;
+}
+
+function selectFirstMatchGame() {
+  if (selectedMatchGame.value && matchGameQuery.value === formatMatchGameOption(selectedMatchGame.value)) {
+    matchPickerOpen.value = false;
+    return;
+  }
+  const game = limitedMatchGames.value[0];
+  if (game) {
+    selectMatchGame(game);
+  }
+}
+
+function clearMatchGameSelection() {
+  matchGameId.value = "";
+  matchGameQuery.value = "";
+  openMatchPicker();
+}
+
+function handleMatchGameInput() {
+  if (selectedMatchGame.value && matchGameQuery.value !== formatMatchGameOption(selectedMatchGame.value)) {
+    matchGameId.value = "";
+  }
+  openMatchPicker();
+}
+
 function startMatchEdit() {
   matchEditing.value = true;
-  matchGameId.value = "";
+  resetMatchPicker();
 }
 
 function cancelMatchEdit() {
   matchEditing.value = false;
-  matchGameId.value = "";
+  resetMatchPicker();
 }
 
 function openImagePreview(image: string, sequence: string[] = previewImages.value) {
@@ -1558,9 +1752,9 @@ function requestDeleteSourceItem(item: SourceItem) {
   pendingDelete.value = {
     kind: "item",
     id: item.id,
-    title: item.title,
-    firstMessage: "Delete this source item?",
-    secondMessage: "This removes the raw HTML and unreferenced attachments from disk."
+    title: sourceItemTitle(item),
+    firstMessage: "Delete this source record?",
+    secondMessage: "This removes the raw capture and unreferenced attachments from disk."
   };
 }
 
@@ -1588,14 +1782,14 @@ async function confirmDelete() {
       gamePanelMode.value = "detail";
     } else {
       await api<{ deleted: boolean }>(`/api/source-items/${target.id}`, { method: "DELETE" });
-      showNotice("Item deleted");
+      showNotice("Source record deleted");
       selectedItem.value = null;
-      matchGameId.value = "";
+      resetMatchPicker();
     }
     pendingDelete.value = null;
     await loadAll();
-    if (target.kind === "item" && sourceItems.value.length > 0) {
-      selectItem(sourceItems.value[0]);
+    if (target.kind === "item" && unmatchedSourceItems.value.length > 0) {
+      selectItem(unmatchedSourceItems.value[0]);
     }
   } catch (err) {
     error.value = toMessage(err);
@@ -1606,7 +1800,7 @@ async function confirmDelete() {
 
 function selectItem(item: SourceItem) {
   selectedItem.value = item;
-  matchGameId.value = "";
+  resetMatchPicker();
   matchEditing.value = false;
 }
 
@@ -1635,7 +1829,7 @@ function openTaskResult(task: Task) {
   }
   if (task.result_json?.item) {
     selectItem(task.result_json.item);
-    view.value = "items";
+    view.value = "review";
   }
 }
 
@@ -1660,6 +1854,12 @@ function taskProgress(task: Task) {
 
 function taskResultTitle(task: Task) {
   return task.result_json?.game?.title || task.result_json?.item?.title || "";
+}
+
+function compareSourceItemsByUpdatedAt(left: SourceItem, right: SourceItem) {
+  const leftTime = Date.parse(left.updated_at || left.fetched_at || left.created_at);
+  const rightTime = Date.parse(right.updated_at || right.fetched_at || right.created_at);
+  return rightTime - leftTime;
 }
 
 function collectSourceItemsForTask(task: Task) {
@@ -1689,16 +1889,41 @@ function collectSourceItemsForTask(task: Task) {
       .filter((item) => item.source_type === resultItem.source_type && item.external_id === resultItem.external_id)
       .forEach(addItem);
   }
-  return items.sort((left, right) => {
-    const leftTime = Date.parse(left.updated_at || left.fetched_at || left.created_at);
-    const rightTime = Date.parse(right.updated_at || right.fetched_at || right.created_at);
-    return rightTime - leftTime;
-  });
+  return items.sort(compareSourceItemsByUpdatedAt);
 }
 
 function sourceItemLabel(item: SourceItem) {
   const source = item.source_id ? sources.value.find((entry) => entry.id === item.source_id) : null;
   return source?.name || item.source_type || "Unknown adapter";
+}
+
+function sourceItemTitle(item: SourceItem) {
+  return item.title || item.parsed_json?.fields?.game_name || item.parsed_json?.inferred?.game_title || "Untitled source";
+}
+
+function sourceItemSubtitle(item: SourceItem) {
+  const parts = [sourceItemLabel(item), item.external_id || "no external id", item.status].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function sourceItemRawHref(item: SourceItem) {
+  return item.raw_content_path ? `/api/source-items/${item.id}/raw` : "";
+}
+
+function openSourceRecord(item: SourceItem) {
+  selectItem(item);
+  view.value = "review";
+}
+
+function openReviewQueue() {
+  if (unmatchedSourceItems.value.length > 0) {
+    selectItem(unmatchedSourceItems.value[0]);
+  } else if (selectedItem.value?.matched_game_id) {
+    selectedItem.value = null;
+    resetMatchPicker();
+    matchEditing.value = false;
+  }
+  view.value = "review";
 }
 
 function transcriptImageList(transcript?: Transcript | null) {
@@ -1794,6 +2019,19 @@ function formatTimestamp(value?: string, fallback = "Never") {
 
 function adapterName(adapterID: string) {
   return availableAdapters.value.find((adapter) => adapter.id === adapterID)?.name ?? adapterID;
+}
+
+function formatMatchGameOption(game: Game) {
+  return `${game.title}${game.current_version ? ` · ${game.current_version}` : ""}`;
+}
+
+function gameMatchesQuery(game: Game, needle: string) {
+  return (
+    game.title.toLowerCase().includes(needle) ||
+    game.current_version.toLowerCase().includes(needle) ||
+    game.aliases.some((alias) => alias.toLowerCase().includes(needle)) ||
+    String(game.id).includes(needle)
+  );
 }
 
 function formatAuthExpiry(profile?: AuthProfile | null) {
@@ -2025,6 +2263,12 @@ watch(adapterBrowsePage, persistAdapterBrowseState, { deep: true });
 
 watch(selectedAdapterId, persistAdapterBrowseState);
 
+watch(matchGameQuery, () => {
+  if (selectedMatchGame.value && matchGameQuery.value !== formatMatchGameOption(selectedMatchGame.value)) {
+    matchGameId.value = "";
+  }
+});
+
 watch(selectedTelegramSourceIds, () => {
   adapterBrowseDraft.offset_id = 0;
   if (selectedTelegramSourceIds.value.length !== 1) {
@@ -2099,6 +2343,9 @@ onUnmounted(() => {
   if (errorTimer !== undefined) {
     window.clearTimeout(errorTimer);
   }
+  if (matchPickerCloseTimer !== undefined) {
+    window.clearTimeout(matchPickerCloseTimer);
+  }
   window.removeEventListener("keydown", handlePreviewKeydown);
 });
 </script>
@@ -2124,9 +2371,10 @@ onUnmounted(() => {
           <Icon name="download" :size="18" />
           <span>Import</span>
         </button>
-        <button :class="{ active: view === 'items' }" title="Items" @click="view = 'items'">
+        <button :class="{ active: view === 'review' }" title="Review" @click="openReviewQueue">
           <Icon name="file-search" :size="18" />
-          <span>Items</span>
+          <span>Review</span>
+          <small v-if="reviewItemCount" class="nav-badge">{{ reviewItemCount }}</small>
         </button>
         <button :class="{ active: view === 'tasks' }" title="Tasks" @click="view = 'tasks'">
           <Icon name="activity" :size="18" />
@@ -2186,9 +2434,9 @@ onUnmounted(() => {
                 <Icon name="x" :size="17" />
                 <span>Cancel</span>
               </button>
-              <button class="primary" @click="saveGame">
+              <button class="primary" :disabled="savingGame" @click="saveGame">
                 <Icon name="save" :size="17" />
-                <span>Save</span>
+                <span>{{ savingGame ? "Saving" : "Save" }}</span>
               </button>
             </div>
           </div>
@@ -2229,6 +2477,32 @@ onUnmounted(() => {
             </div>
           </div>
 
+          <div class="subtab-row game-detail-tabs" role="tablist" aria-label="Game detail">
+            <button
+              type="button"
+              class="subtab-button"
+              :class="{ active: selectedGameTab === 'details' }"
+              role="tab"
+              :aria-selected="selectedGameTab === 'details'"
+              @click="selectedGameTab = 'details'"
+            >
+              <span>Details</span>
+              <small>Merged fields</small>
+            </button>
+            <button
+              type="button"
+              class="subtab-button"
+              :class="{ active: selectedGameTab === 'sources' }"
+              role="tab"
+              :aria-selected="selectedGameTab === 'sources'"
+              @click="selectedGameTab = 'sources'"
+            >
+              <span>Sources</span>
+              <small>{{ selectedGameSourceItems.length }} linked</small>
+            </button>
+          </div>
+
+          <template v-if="selectedGameTab === 'details'">
           <div v-if="selectedGameMediaEntries.length" class="image-strip">
             <div
               v-for="entry in selectedGameMediaEntries"
@@ -2248,7 +2522,7 @@ onUnmounted(() => {
               <div v-else class="image-thumb image-placeholder">
                 <Icon name="image-off" :size="20" />
                 <strong>{{ entry.role === "cover" ? "Cover failed" : "Image failed" }}</strong>
-                <small>Open item to retry</small>
+                <small>Open source record to retry</small>
               </div>
             </div>
           </div>
@@ -2401,15 +2675,156 @@ onUnmounted(() => {
           </section>
 
           <div class="result-actions">
-            <button v-if="selectedGameSourceItem" class="secondary" @click="selectItem(selectedGameSourceItem); view = 'items'">
+            <button v-if="selectedGameSourceItem" class="secondary" @click="openSourceRecord(selectedGameSourceItem)">
               <Icon name="file-search" :size="17" />
-              <span>Open item</span>
+              <span>Open source record</span>
             </button>
+            <a
+              v-if="selectedGameSourceItem && sourceItemRawHref(selectedGameSourceItem)"
+              class="open-link"
+              :href="sourceItemRawHref(selectedGameSourceItem)"
+              target="_blank"
+            >
+              <Icon name="file-search" :size="17" />
+              <span>Raw capture</span>
+            </a>
             <a v-if="selectedGameSourceItem?.raw_url" class="open-link" :href="selectedGameSourceItem.raw_url" target="_blank">
               <Icon name="eye" :size="17" />
               <span>Open source</span>
             </a>
           </div>
+          </template>
+
+          <template v-else>
+            <div class="source-tab-header">
+              <div>
+                <h3>Linked Source Records</h3>
+                <p>Adapter transcripts stay attached here; merged fields are shown in Details.</p>
+              </div>
+              <div class="button-row">
+                <button class="secondary" @click="sourceLinkOpen = !sourceLinkOpen">
+                  <Icon name="cable" :size="17" />
+                  <span>{{ sourceLinkOpen ? "Close linker" : "Link source" }}</span>
+                </button>
+                <button class="primary" @click="view = 'import'">
+                  <Icon name="download" :size="17" />
+                  <span>Import</span>
+                </button>
+              </div>
+            </div>
+
+            <div v-if="sourceLinkOpen" class="source-link-panel">
+              <div class="adapter-browser-summary">
+                <div>
+                  <strong>Review queue</strong>
+                  <small>{{ unmatchedSourceItems.length }} unlinked source records</small>
+                </div>
+                <button class="secondary" @click="openReviewQueue">
+                  <Icon name="file-search" :size="17" />
+                  <span>Open Review</span>
+                </button>
+              </div>
+              <div v-if="unmatchedSourceItems.length" class="source-link-list">
+                <div v-for="item in unmatchedSourceItems" :key="item.id" class="source-record-row">
+                  <span class="item-state" :class="item.status"></span>
+                  <span class="row-main">
+                    <strong>{{ sourceItemTitle(item) }}</strong>
+                    <small>{{ sourceItemSubtitle(item) }}</small>
+                  </span>
+                  <div class="row-actions">
+                    <button class="secondary" @click="openSourceRecord(item)">
+                      <Icon name="eye" :size="16" />
+                      <span>Inspect</span>
+                    </button>
+                    <button
+                      class="primary"
+                      :disabled="matchingItemId === item.id"
+                      @click="linkSourceItemToSelectedGame(item)"
+                    >
+                      <Icon name="cable" :size="16" />
+                      <span>{{ matchingItemId === item.id ? "Linking" : "Link" }}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="task-empty-row">
+                <Icon name="check" :size="18" />
+                <strong>No unlinked source records</strong>
+              </div>
+            </div>
+
+            <div v-if="selectedGameSourceItems.length" class="source-record-list">
+              <div v-for="item in selectedGameSourceItems" :key="item.id" class="source-record-card">
+                <div class="source-record-card-head">
+                  <span class="item-state" :class="item.status"></span>
+                  <span class="row-main">
+                    <strong>{{ sourceItemTitle(item) }}</strong>
+                    <small>{{ sourceItemSubtitle(item) }}</small>
+                  </span>
+                  <span class="status-pill succeeded">{{ sourceItemLabel(item) }}</span>
+                </div>
+                <div class="meta-grid compact-meta-grid">
+                  <div>
+                    <span>Fetched</span>
+                    <strong>{{ formatTimestamp(item.fetched_at, "Unknown") }}</strong>
+                  </div>
+                  <div>
+                    <span>Updated</span>
+                    <strong>{{ formatTimestamp(item.updated_at, "Unknown") }}</strong>
+                  </div>
+                  <div>
+                    <span>External ID</span>
+                    <strong>{{ item.external_id || "None" }}</strong>
+                  </div>
+                  <div>
+                    <span>Raw capture</span>
+                    <strong>{{ item.raw_content_path ? "Saved" : "Not saved" }}</strong>
+                  </div>
+                </div>
+                <div class="result-actions">
+                  <button class="secondary" @click="openSourceRecord(item)">
+                    <Icon name="file-search" :size="17" />
+                    <span>Inspect</span>
+                  </button>
+                  <a v-if="sourceItemRawHref(item)" class="open-link" :href="sourceItemRawHref(item)" target="_blank">
+                    <Icon name="file-search" :size="17" />
+                    <span>Raw capture</span>
+                  </a>
+                  <a v-if="item.raw_url" class="open-link" :href="item.raw_url" target="_blank">
+                    <Icon name="eye" :size="17" />
+                    <span>Open source</span>
+                  </a>
+                  <button
+                    class="secondary"
+                    :disabled="unlinkingItemId === item.id"
+                    @click="unlinkSourceItem(item)"
+                  >
+                    <Icon name="x" :size="17" />
+                    <span>{{ unlinkingItemId === item.id ? "Unlinking" : "Unlink" }}</span>
+                  </button>
+                  <button class="danger" @click="requestDeleteSourceItem(item)">
+                    <Icon name="trash" :size="17" />
+                    <span>Delete</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div v-else class="empty-detail source-empty-detail">
+              <Icon name="file-search" :size="24" />
+              <strong>No sources linked</strong>
+              <div class="button-row">
+                <button class="secondary" @click="sourceLinkOpen = true">
+                  <Icon name="cable" :size="17" />
+                  <span>Link from Review</span>
+                </button>
+                <button class="primary" @click="view = 'import'">
+                  <Icon name="download" :size="17" />
+                  <span>Import source</span>
+                </button>
+              </div>
+            </div>
+          </template>
         </div>
 
         <div v-else class="detail-pane">
@@ -2979,17 +3394,8 @@ onUnmounted(() => {
           <div v-if="adapterBrowsePage" class="adapter-result-list">
             <div v-for="item in adapterBrowsePage.items" :key="item.url" class="adapter-result-row">
               <button
-                v-if="item.adapter_id === 'telegram'"
-                class="adapter-result-cover is-message"
-                type="button"
-                disabled
-              >
-                <Icon name="file-search" :size="22" />
-              </button>
-              <button
-                v-else
                 class="adapter-result-cover"
-                :class="`is-${adapterBrowseCoverStatus(item)}`"
+                :class="[item.adapter_id === 'telegram' && !adapterBrowseCoverSrc(item) ? 'is-message' : '', `is-${adapterBrowseCoverStatus(item)}`]"
                 type="button"
                 title="Preview cover"
                 :disabled="adapterBrowseCoverStatus(item) !== 'loaded'"
@@ -3059,9 +3465,9 @@ onUnmounted(() => {
                 <Icon name="x" :size="17" />
                 <span>Clear</span>
               </button>
-              <button class="primary" @click="runImport">
+              <button class="primary" :disabled="loading || !importDraft.url.trim()" @click="runImport">
                 <Icon name="download" :size="17" />
-                <span>Import</span>
+                <span>{{ loading ? "Importing" : "Import" }}</span>
               </button>
             </div>
           </div>
@@ -3277,6 +3683,19 @@ onUnmounted(() => {
                 </dl>
               </section>
               <div class="result-actions">
+                <button class="secondary" @click="openSourceRecord(selectedTaskSourceItem)">
+                  <Icon name="file-search" :size="17" />
+                  <span>Inspect</span>
+                </button>
+                <a
+                  v-if="sourceItemRawHref(selectedTaskSourceItem)"
+                  class="open-link"
+                  :href="sourceItemRawHref(selectedTaskSourceItem)"
+                  target="_blank"
+                >
+                  <Icon name="file-search" :size="17" />
+                  <span>Raw capture</span>
+                </a>
                 <a v-if="selectedTaskSourceItem.raw_url" class="open-link" :href="selectedTaskSourceItem.raw_url" target="_blank">
                   <Icon name="eye" :size="17" />
                   <span>Open source</span>
@@ -3293,13 +3712,14 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <section v-else class="workspace two-column items-layout">
+      <section v-else class="workspace two-column review-layout">
         <div class="list-pane">
           <div class="pane-title">
-            <h1>Items</h1>
+            <h1>Review</h1>
+            <small class="section-count">{{ reviewItemCount }}</small>
           </div>
           <div
-            v-for="item in sourceItems"
+            v-for="item in reviewSourceItems"
             :key="item.id"
             :class="{ selected: selectedItem?.id === item.id }"
             class="row-entry"
@@ -3311,31 +3731,45 @@ onUnmounted(() => {
             >
               <span class="item-state" :class="item.status"></span>
               <span class="row-main">
-                <strong>{{ item.title }}</strong>
-                <small>{{ item.external_id || "no external id" }} · {{ item.status }}</small>
+                <strong>{{ sourceItemTitle(item) }}</strong>
+                <small>{{ sourceItemSubtitle(item) }}</small>
               </span>
             </button>
-            <button class="row-delete" title="Delete item" @click.stop="requestDeleteSourceItem(item)">
+            <button class="row-delete" title="Delete source record" @click.stop="requestDeleteSourceItem(item)">
               <Icon name="trash" :size="16" />
             </button>
           </div>
-          <div v-if="sourceItems.length === 0" class="empty-state">
+          <div v-if="reviewSourceItems.length === 0" class="empty-state">
             <Icon name="file-search" :size="20" />
-            <strong>No items</strong>
+            <strong>No records to review</strong>
           </div>
         </div>
 
         <div v-if="selectedItem" class="detail-pane transcript-pane">
           <div class="pane-title">
-            <h2>{{ selectedItem.title }}</h2>
+            <h2>{{ sourceItemTitle(selectedItem) }}</h2>
             <div class="button-row">
               <button v-if="selectedMatchedGame" class="secondary" @click="openMatchedGame">
                 <Icon name="eye" :size="17" />
                 <span>Open game</span>
               </button>
-              <button v-else class="secondary" @click="createGameFromItem(selectedItem)">
+              <button
+                v-else
+                class="secondary"
+                :disabled="creatingGameItemId === selectedItem.id"
+                @click="createGameFromItem(selectedItem)"
+              >
                 <Icon name="plus" :size="17" />
-                <span>Create game</span>
+                <span>{{ creatingGameItemId === selectedItem.id ? "Creating" : "Create game" }}</span>
+              </button>
+              <button
+                v-if="selectedMatchedGame"
+                class="secondary"
+                :disabled="unlinkingItemId === selectedItem.id"
+                @click="unlinkSourceItem(selectedItem)"
+              >
+                <Icon name="x" :size="17" />
+                <span>{{ unlinkingItemId === selectedItem.id ? "Unlinking" : "Unlink" }}</span>
               </button>
               <button class="secondary" :disabled="mediaRetrying" @click="retryItemImages(selectedItem)">
                 <Icon name="refresh" :size="17" />
@@ -3346,26 +3780,83 @@ onUnmounted(() => {
 
           <div class="match-bar">
             <span v-if="selectedMatchedGame" class="match-current">
-              Matched to <strong>{{ selectedMatchedGame.title }}</strong>
+              Linked to <strong>{{ selectedMatchedGame.title }}</strong>
             </span>
             <template v-if="!selectedMatchedGame || matchEditing">
-              <select v-if="availableMatchGames.length" v-model="matchGameId">
-                <option value="">{{ selectedMatchedGame ? "Choose another game..." : "Select game..." }}</option>
-                <option v-for="game in availableMatchGames" :key="game.id" :value="game.id">
-                  {{ game.title }}
-                </option>
-              </select>
+              <div v-if="availableMatchGames.length" class="match-picker">
+                <div class="match-combobox" @focusin="openMatchPicker" @focusout="closeMatchPickerSoon">
+                  <div
+                    class="match-combobox-field"
+                    :class="{ selected: Boolean(selectedMatchGame) }"
+                    @mousedown="openMatchPicker"
+                  >
+                    <Icon name="search" :size="16" />
+                    <input
+                      v-model="matchGameQuery"
+                      type="text"
+                      role="combobox"
+                      autocomplete="off"
+                      :aria-expanded="matchPickerOpen"
+                      placeholder="Search or select game"
+                      @focus="openMatchPicker"
+                      @input="handleMatchGameInput"
+                      @keydown.enter.prevent="selectFirstMatchGame"
+                      @keydown.escape.prevent="matchPickerOpen = false"
+                    />
+                    <button
+                      v-if="matchGameQuery"
+                      class="match-combobox-clear"
+                      type="button"
+                      title="Clear selection"
+                      @mousedown.prevent
+                      @click="clearMatchGameSelection"
+                    >
+                      <Icon name="x" :size="14" />
+                    </button>
+                  </div>
+
+                  <div v-if="matchPickerOpen" class="match-combobox-menu" role="listbox">
+                    <button
+                      v-for="game in limitedMatchGames"
+                      :key="game.id"
+                      class="match-combobox-option"
+                      :class="{ selected: selectedMatchGame?.id === game.id }"
+                      type="button"
+                      role="option"
+                      :aria-selected="selectedMatchGame?.id === game.id"
+                      @mousedown.prevent="selectMatchGame(game)"
+                    >
+                      <span class="row-main">
+                        <strong>{{ game.title }}</strong>
+                        <small>
+                          {{ game.current_version || "No version" }}
+                          <template v-if="game.aliases.length"> · {{ game.aliases.slice(0, 2).join(", ") }}</template>
+                          · ID {{ game.id }}
+                        </small>
+                      </span>
+                      <Icon v-if="selectedMatchGame?.id === game.id" name="check" :size="16" />
+                    </button>
+                    <span v-if="limitedMatchGames.length === 0" class="match-combobox-empty">
+                      No games match this search.
+                    </span>
+                    <small class="match-combobox-footer">
+                      Showing {{ limitedMatchGames.length }} of {{ matchingMatchGames.length }}
+                      <template v-if="hiddenMatchGameCount"> · {{ hiddenMatchGameCount }} more, keep typing</template>
+                    </small>
+                  </div>
+                </div>
+              </div>
               <span v-else class="match-empty">
                 {{ selectedMatchedGame ? "No other games available" : "No games available to match" }}
               </span>
               <button
                 v-if="availableMatchGames.length"
                 class="secondary"
-                :disabled="!canApplyMatch"
+                :disabled="!canApplyMatch || matchingItemId === selectedItem.id"
                 @click="matchItem(selectedItem)"
               >
                 <Icon name="cable" :size="17" />
-                <span>{{ selectedMatchedGame ? "Apply" : "Match" }}</span>
+                <span>{{ matchingItemId === selectedItem.id ? "Linking" : selectedMatchedGame ? "Apply" : "Link" }}</span>
               </button>
               <button v-if="matchEditing" class="secondary" @click="cancelMatchEdit">
                 <Icon name="x" :size="17" />
@@ -3374,7 +3865,7 @@ onUnmounted(() => {
             </template>
             <button v-else-if="availableMatchGames.length" class="secondary" @click="startMatchEdit">
               <Icon name="cable" :size="17" />
-              <span>Change match</span>
+              <span>Change link</span>
             </button>
           </div>
 
@@ -3430,6 +3921,22 @@ onUnmounted(() => {
           </div>
 
           <div class="meta-grid">
+            <div>
+              <span>Adapter</span>
+              <strong>{{ sourceItemLabel(selectedItem) }}</strong>
+            </div>
+            <div>
+              <span>Status</span>
+              <strong>{{ selectedItem.status }}</strong>
+            </div>
+            <div>
+              <span>External ID</span>
+              <strong>{{ selectedItem.external_id || "None" }}</strong>
+            </div>
+            <div>
+              <span>Fetched</span>
+              <strong>{{ formatTimestamp(selectedItem.fetched_at, "Unknown") }}</strong>
+            </div>
             <div>
               <span>Game</span>
               <strong>{{ selectedTranscript.fields?.game_name || selectedTranscript.inferred?.game_title || selectedTranscript.title }}</strong>
@@ -3556,10 +4063,20 @@ onUnmounted(() => {
           </section>
 
           <div class="result-actions">
+            <a v-if="sourceItemRawHref(selectedItem)" class="open-link" :href="sourceItemRawHref(selectedItem)" target="_blank">
+              <Icon name="file-search" :size="17" />
+              <span>Raw capture</span>
+            </a>
             <a v-if="selectedItem.raw_url" class="open-link" :href="selectedItem.raw_url" target="_blank">
               <Icon name="eye" :size="17" />
               <span>Open source</span>
             </a>
+          </div>
+        </div>
+        <div v-else class="detail-pane">
+          <div class="empty-detail">
+            <Icon name="file-search" :size="24" />
+            <strong>No source record selected</strong>
           </div>
         </div>
       </section>

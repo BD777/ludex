@@ -76,6 +76,60 @@ func TestUpsertSourceItemByAdapterKeyReplacesExistingItem(t *testing.T) {
 	}
 }
 
+func TestDeduplicateGamesByTitleKeepsLinkedGame(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	emptyDuplicate, err := store.CreateGame(ctx, domain.Game{Title: "Ripples", CurrentVersion: "0.9.21"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkedDuplicate, err := store.CreateGame(ctx, domain.Game{Title: "Ripples", CurrentVersion: "0.9.22"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := store.CreateSourceItem(ctx, domain.SourceItem{
+		SourceType:    "telegram",
+		ExternalID:    "group:1",
+		Title:         "Ripples",
+		ParsedJSON:    map[string]any{"title": "Ripples"},
+		MatchedGameID: &linkedDuplicate.ID,
+		Status:        "matched",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := store.deduplicateGamesByTitle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d", removed)
+	}
+	if _, err := store.GetGame(ctx, emptyDuplicate.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("empty duplicate should be removed, err = %v", err)
+	}
+	kept, err := store.GetGame(ctx, linkedDuplicate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.Title != "Ripples" {
+		t.Fatalf("kept title = %q", kept.Title)
+	}
+	item, err = store.GetSourceItem(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.MatchedGameID == nil || *item.MatchedGameID != linkedDuplicate.ID {
+		t.Fatalf("matched game id = %#v", item.MatchedGameID)
+	}
+}
+
 func TestAuthProfileStoresMetadataWithoutJSONCookieValues(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
@@ -363,5 +417,21 @@ func TestDeleteSourceItemDeletesRawAndOnlyItemOwnedMedia(t *testing.T) {
 	}
 	if shared.SourceItemID != nil || shared.GameID == nil || *shared.GameID != game.ID {
 		t.Fatalf("shared media refs = game %#v item %#v", shared.GameID, shared.SourceItemID)
+	}
+}
+
+func TestDeleteSourceItemMissingIsIdempotent(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	paths, err := store.DeleteSourceItem(context.Background(), 404)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("deleted paths = %#v", paths)
 	}
 }

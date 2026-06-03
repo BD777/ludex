@@ -120,6 +120,10 @@ button {
   background: transparent;
 }
 
+.compact-searchbox {
+  height: 38px;
+}
+
 .list-filter-row {
   padding: 12px 16px;
   border-bottom: 1px solid #e7e3da;
@@ -564,8 +568,21 @@ textarea:focus {
   background: #b33b3b;
 }
 
-.items-layout .detail-pane {
+.review-layout .detail-pane {
   gap: 18px;
+}
+
+.section-count {
+  display: inline-grid;
+  min-width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  color: #607067;
+  background: #ede8dd;
+  font-size: 0.76rem;
+  font-weight: 800;
 }
 
 .tasks-layout .detail-pane {
@@ -660,6 +677,74 @@ textarea:focus {
 .source-record-panel {
   display: grid;
   gap: 12px;
+}
+
+.game-detail-tabs {
+  padding-bottom: 2px;
+}
+
+.source-tab-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.source-tab-header > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.source-tab-header p {
+  color: #667269;
+  font-size: 0.86rem;
+}
+
+.source-link-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d7e4dc;
+  border-radius: 8px;
+  background: #f6fbf7;
+}
+
+.source-link-list,
+.source-record-list {
+  display: grid;
+  gap: 9px;
+}
+
+.source-record-row,
+.source-record-card {
+  display: grid;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid #e3dfd5;
+  border-radius: 8px;
+  background: #fffdfa;
+}
+
+.source-record-row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.source-record-card-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.compact-meta-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.source-empty-detail {
+  border: 1px dashed #dedbd2;
+  border-radius: 8px;
+  background: #fbfaf7;
 }
 
 .task-list-section {
@@ -868,6 +953,119 @@ textarea:focus {
   align-items: center;
   min-height: 38px;
   color: #667269;
+}
+
+.match-picker {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.match-combobox {
+  position: relative;
+  min-width: 0;
+}
+
+.match-combobox-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 39px;
+  padding: 0 9px 0 11px;
+  border: 1px solid #cfc9bc;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.match-combobox-field:focus-within {
+  border-color: #3f8267;
+  box-shadow: 0 0 0 3px rgba(63, 130, 103, 0.14);
+}
+
+.match-combobox-field.selected {
+  border-color: #9ec1ae;
+  background: #f5faf6;
+}
+
+.match-combobox-field input {
+  height: 37px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.match-combobox-field input:focus {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.match-combobox-clear {
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  color: #5f6a63;
+  border-radius: 6px;
+  background: transparent;
+}
+
+.match-combobox-clear:hover {
+  color: #243d35;
+  background: #e7eee7;
+}
+
+.match-combobox-menu {
+  position: absolute;
+  z-index: 12;
+  top: calc(100% + 5px);
+  right: 0;
+  left: 0;
+  display: grid;
+  max-height: 310px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid #cfc9bc;
+  border-radius: 8px;
+  background: #fffdfa;
+  box-shadow: 0 18px 45px rgba(31, 53, 47, 0.18);
+}
+
+.match-combobox-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 50px;
+  padding: 8px 9px;
+  color: #17201c;
+  border-radius: 7px;
+  background: transparent;
+  text-align: left;
+}
+
+.match-combobox-option:hover,
+.match-combobox-option.selected {
+  background: #eef7f0;
+}
+
+.match-combobox-option .row-main {
+  gap: 1px;
+}
+
+.match-combobox-empty,
+.match-combobox-footer {
+  color: #667269;
+  font-size: 0.78rem;
+}
+
+.match-combobox-empty {
+  padding: 10px 9px;
+}
+
+.match-combobox-footer {
+  padding: 6px 9px 4px;
 }
 
 .image-strip {
@@ -1782,11 +1980,19 @@ dd {
   .two-column,
   .adapters-layout,
   .meta-grid,
+  .compact-meta-grid,
   .adapter-browser-controls,
   .telegram-auth-grid,
   .telegram-dialog-toolbar,
-  .match-bar {
+  .match-bar,
+  .source-record-row,
+  .source-record-card-head {
     grid-template-columns: 1fr;
+  }
+
+  .source-tab-header {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .form-action-cell {
