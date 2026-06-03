@@ -67,6 +67,17 @@ func (s *Store) DataDir() string {
 	return s.dataDir
 }
 
+func sqlPlaceholders(count int) string {
+	if count <= 0 {
+		return ""
+	}
+	values := make([]string, count)
+	for i := range values {
+		values[i] = "?"
+	}
+	return strings.Join(values, ", ")
+}
+
 func defaultDatabasePath(dataDir string) string {
 	current := filepath.Join(dataDir, "ludex.db")
 	legacy := filepath.Join(dataDir, "game-meta-browser.db")
@@ -104,6 +115,122 @@ func (s *Store) ensureColumn(ctx context.Context, table string, column string, d
 	}
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition))
 	return err
+}
+
+func (s *Store) deduplicateSourceItemsByAdapterKey(ctx context.Context) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT source_type, external_id
+FROM source_items
+WHERE source_type != '' AND external_id != ''
+GROUP BY source_type, external_id
+HAVING COUNT(*) > 1`)
+	if err != nil {
+		return 0, err
+	}
+	type duplicateKey struct {
+		sourceType string
+		externalID string
+	}
+	keys := []duplicateKey{}
+	for rows.Next() {
+		var key duplicateKey
+		if err := rows.Scan(&key.sourceType, &key.externalID); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+
+	removed := 0
+	for _, key := range keys {
+		count, err := s.mergeDuplicateSourceItemsByAdapterKey(ctx, key.sourceType, key.externalID)
+		if err != nil {
+			return removed, err
+		}
+		removed += count
+	}
+	return removed, nil
+}
+
+func (s *Store) mergeDuplicateSourceItemsByAdapterKey(ctx context.Context, sourceType string, externalID string) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	rows, err := tx.QueryContext(ctx, `
+SELECT id, matched_game_id
+FROM source_items
+WHERE source_type = ? AND external_id = ?
+ORDER BY matched_game_id IS NOT NULL DESC, updated_at DESC, id DESC`, sourceType, externalID)
+	if err != nil {
+		return 0, err
+	}
+	type itemRef struct {
+		id            int64
+		matchedGameID sql.NullInt64
+	}
+	refs := []itemRef{}
+	for rows.Next() {
+		var ref itemRef
+		if err := rows.Scan(&ref.id, &ref.matchedGameID); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(refs) <= 1 {
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+		tx = nil
+		return 0, nil
+	}
+
+	keep := refs[0]
+	duplicateArgs := make([]any, 0, len(refs)-1)
+	for _, ref := range refs[1:] {
+		duplicateArgs = append(duplicateArgs, ref.id)
+	}
+	placeholders := sqlPlaceholders(len(duplicateArgs))
+
+	if keep.matchedGameID.Valid {
+		args := append([]any{keep.matchedGameID.Int64}, duplicateArgs...)
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+UPDATE media_assets
+SET game_id = COALESCE(game_id, ?)
+WHERE source_item_id IN (%s)`, placeholders), args...); err != nil {
+			return 0, err
+		}
+	}
+	args := append([]any{keep.id}, duplicateArgs...)
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+UPDATE media_assets
+SET source_item_id = ?
+WHERE source_item_id IN (%s)`, placeholders), args...); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+DELETE FROM source_items
+WHERE id IN (%s)`, placeholders), duplicateArgs...); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	tx = nil
+	return len(duplicateArgs), nil
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -233,10 +360,20 @@ UPDATE source_items
 SET source_type = 'f95zone'
 WHERE source_type = '' AND external_id != '';
 
-CREATE INDEX IF NOT EXISTS idx_source_items_adapter_key ON source_items(source_type, external_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_dedupe_key ON tasks(kind, dedupe_key);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_active_dedupe_key ON tasks(kind, dedupe_key)
 WHERE dedupe_key != '' AND status IN ('queued', 'running');
+`)
+	if err != nil {
+		return err
+	}
+	if _, err := s.deduplicateSourceItemsByAdapterKey(ctx); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+DROP INDEX IF EXISTS idx_source_items_adapter_key;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_source_items_adapter_key ON source_items(source_type, external_id)
+WHERE source_type != '' AND external_id != '';
 `)
 	return err
 }

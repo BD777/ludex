@@ -76,6 +76,101 @@ func TestUpsertSourceItemByAdapterKeyReplacesExistingItem(t *testing.T) {
 	}
 }
 
+func TestDeduplicateSourceItemsByAdapterKeyMergesExistingDuplicates(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if _, err := store.db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_source_items_adapter_key`); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := store.CreateSourceItem(ctx, domain.SourceItem{
+		SourceType: "f95zone",
+		ExternalID: "12345",
+		Title:      "Duplicate without match",
+		RawURL:     "https://f95zone.to/threads/old.12345/",
+		ParsedJSON: map[string]any{"title": "old"},
+		Status:     "imported",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset, err := store.CreateMediaAsset(ctx, domain.MediaAsset{
+		SourceItemID: &first.ID,
+		Type:         "image",
+		LocalPath:    "media/old.jpg",
+		OriginalURL:  "https://example.test/old.jpg",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	game, err := store.CreateGame(ctx, domain.Game{Title: "Matched game"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.CreateSourceItem(ctx, domain.SourceItem{
+		SourceType:    "f95zone",
+		ExternalID:    "12345",
+		Title:         "Duplicate with match",
+		RawURL:        "https://f95zone.to/threads/new.12345/",
+		ParsedJSON:    map[string]any{"title": "new"},
+		MatchedGameID: &game.ID,
+		Status:        "matched",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := store.deduplicateSourceItemsByAdapterKey(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d", removed)
+	}
+	items, err := store.ListSourceItems(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("item count = %d", len(items))
+	}
+	if items[0].ID != second.ID {
+		t.Fatalf("kept item id = %d, want %d", items[0].ID, second.ID)
+	}
+	if items[0].MatchedGameID == nil || *items[0].MatchedGameID != game.ID {
+		t.Fatalf("matched game = %#v", items[0].MatchedGameID)
+	}
+	asset, err = store.GetMediaAsset(ctx, asset.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asset.SourceItemID == nil || *asset.SourceItemID != second.ID {
+		t.Fatalf("asset source item = %#v, want %d", asset.SourceItemID, second.ID)
+	}
+	if asset.GameID == nil || *asset.GameID != game.ID {
+		t.Fatalf("asset game = %#v, want %d", asset.GameID, game.ID)
+	}
+
+	if _, err := store.db.ExecContext(ctx, `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_source_items_adapter_key ON source_items(source_type, external_id)
+WHERE source_type != '' AND external_id != ''`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateSourceItem(ctx, domain.SourceItem{
+		SourceType: "f95zone",
+		ExternalID: "12345",
+		Title:      "Should fail",
+		ParsedJSON: map[string]any{"title": "fail"},
+	}); err == nil {
+		t.Fatal("expected unique adapter key to reject duplicate source item")
+	}
+}
+
 func TestDeduplicateGamesByTitleKeepsLinkedGame(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

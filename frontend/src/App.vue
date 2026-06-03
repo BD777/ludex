@@ -356,6 +356,7 @@ const unlinkingItemId = ref<number | null>(null);
 const mediaRetrying = ref(false);
 const retryingMediaURL = ref("");
 const retryingTaskId = ref<number | null>(null);
+const importQueueing = ref(false);
 const sourceLinkOpen = ref(false);
 let noticeTimer: number | undefined;
 let errorTimer: number | undefined;
@@ -905,6 +906,46 @@ async function loadTasks() {
   }
 }
 
+function upsertTaskInState(task: Task) {
+  const index = tasks.value.findIndex((entry) => entry.id === task.id);
+  if (index >= 0) {
+    tasks.value = tasks.value.map((entry) => (entry.id === task.id ? task : entry));
+  } else {
+    tasks.value = [task, ...tasks.value];
+  }
+  if (selectedTask.value?.id === task.id) {
+    selectedTask.value = task;
+  }
+}
+
+function markTaskRetriedLocally(taskID: number, retriedByTaskID: number) {
+  tasks.value = tasks.value.map((task) => {
+    if (task.id !== taskID) {
+      return task;
+    }
+    return {
+      ...task,
+      result_json: {
+        ...(task.result_json ?? {}),
+        retried_by_task_id: retriedByTaskID
+      }
+    };
+  });
+}
+
+function trackQueuedImportTask(task: Task) {
+  upsertTaskInState(task);
+  lastImportTaskId.value = task.id;
+  persistLastImportTaskId();
+  selectedTask.value = task;
+}
+
+function refreshTasksInBackground() {
+  void loadTasks().catch((err) => {
+    error.value = toMessage(err);
+  });
+}
+
 function refreshLibraryInBackground() {
   void loadLibrary().catch((err) => {
     error.value = toMessage(err);
@@ -1030,9 +1071,12 @@ async function runImport() {
 }
 
 async function queueF95zoneImport(url: string) {
+  if (importQueueing.value) {
+    return;
+  }
   error.value = "";
   clearNotice();
-  loading.value = true;
+  importQueueing.value = true;
   const payload = {
     url,
     proxy_url: importDraft.proxy_url.trim(),
@@ -1044,14 +1088,12 @@ async function queueF95zoneImport(url: string) {
       body: JSON.stringify(payload)
     });
     showNotice(result.duplicate ? "Import task already running" : "Import task started");
-    lastImportTaskId.value = result.task.id;
-    persistLastImportTaskId();
-    selectedTask.value = result.task;
-    await loadTasks();
+    trackQueuedImportTask(result.task);
+    refreshTasksInBackground();
   } catch (err) {
     error.value = toMessage(err);
   } finally {
-    loading.value = false;
+    importQueueing.value = false;
   }
 }
 
@@ -1070,10 +1112,9 @@ async function retryTask(task: Task) {
       })
     });
     showNotice(result.duplicate ? "Import task already running" : "Import retry started");
-    lastImportTaskId.value = result.task.id;
-    persistLastImportTaskId();
-    selectedTask.value = result.task;
-    await loadTasks();
+    markTaskRetriedLocally(task.id, result.task.id);
+    trackQueuedImportTask(result.task);
+    refreshTasksInBackground();
   } catch (err) {
     error.value = toMessage(err);
   } finally {
@@ -1232,6 +1273,9 @@ async function loadOlderTelegramMessages() {
 }
 
 async function queueTelegramImport(item: AdapterListItem) {
+  if (importQueueing.value) {
+    return;
+  }
   const messageID = telegramMessageID(item);
   const source = telegramSourceForBrowseItem(item);
   if (!source || !messageID) {
@@ -1240,7 +1284,7 @@ async function queueTelegramImport(item: AdapterListItem) {
   }
   error.value = "";
   clearNotice();
-  loading.value = true;
+  importQueueing.value = true;
   try {
     const result = await api<{ task: Task; duplicate?: boolean }>("/api/import/telegram", {
       method: "POST",
@@ -1251,14 +1295,12 @@ async function queueTelegramImport(item: AdapterListItem) {
       })
     });
     showNotice(result.duplicate ? "Telegram import already running" : "Telegram import started");
-    lastImportTaskId.value = result.task.id;
-    persistLastImportTaskId();
-    selectedTask.value = result.task;
-    await loadTasks();
+    trackQueuedImportTask(result.task);
+    refreshTasksInBackground();
   } catch (err) {
     error.value = toMessage(err);
   } finally {
-    loading.value = false;
+    importQueueing.value = false;
   }
 }
 
@@ -1566,9 +1608,10 @@ async function retryItemImages(item: SourceItem) {
       method: "POST",
       body: JSON.stringify({ proxy_url: importDraft.proxy_url.trim() })
     });
+    upsertTaskInState(result.task);
     selectedTask.value = result.task;
     showNotice(result.duplicate ? "Image retry already running" : "Image retry started");
-    await loadTasks();
+    refreshTasksInBackground();
   } catch (err) {
     error.value = toMessage(err);
   } finally {
@@ -1591,9 +1634,10 @@ async function retryItemImage(item: SourceItem, entry: MediaEntry) {
         original_url: entry.original_url
       })
     });
+    upsertTaskInState(result.task);
     selectedTask.value = result.task;
     showNotice(result.duplicate ? "Image retry already running" : "Image retry started");
-    await loadTasks();
+    refreshTasksInBackground();
   } catch (err) {
     error.value = toMessage(err);
   } finally {
@@ -3444,9 +3488,9 @@ onUnmounted(() => {
                   <Icon name="external-link" :size="16" />
                   <span>Open</span>
                 </a>
-                <button class="primary" :disabled="!adapterBrowseCapabilities.import || !item.importable || loading" @click="importBrowseItem(item)">
+                <button class="primary" :disabled="!adapterBrowseCapabilities.import || !item.importable || importQueueing" @click="importBrowseItem(item)">
                   <Icon name="download" :size="16" />
-                  <span>Import</span>
+                  <span>{{ importQueueing ? "Starting" : "Import" }}</span>
                 </button>
               </div>
             </div>
@@ -3467,9 +3511,9 @@ onUnmounted(() => {
                 <Icon name="x" :size="17" />
                 <span>Clear</span>
               </button>
-              <button class="primary" :disabled="loading || !importDraft.url.trim()" @click="runImport">
+              <button class="primary" :disabled="importQueueing || !importDraft.url.trim()" @click="runImport">
                 <Icon name="download" :size="17" />
-                <span>{{ loading ? "Importing" : "Import" }}</span>
+                <span>{{ importQueueing ? "Starting" : "Import" }}</span>
               </button>
             </div>
           </div>
