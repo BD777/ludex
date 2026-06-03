@@ -1,4 +1,4 @@
-module local/ludex
+module github.com/BD777/ludex/backend
 
 go 1.26.1
 

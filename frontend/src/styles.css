@@ -169,9 +169,19 @@ button {
   max-width: 760px;
 }
 
+.import-header-row {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.import-adapter-select {
+  width: min(280px, 100%);
+}
+
 .import-mode-row {
   display: inline-flex;
-  justify-self: start;
   gap: 4px;
   padding: 4px;
   border: 1px solid #dedbd2;
@@ -1981,6 +1991,7 @@ dd {
   .adapters-layout,
   .meta-grid,
   .compact-meta-grid,
+  .import-header-row,
   .adapter-browser-controls,
   .telegram-auth-grid,
   .telegram-dialog-toolbar,
@@ -1988,6 +1999,14 @@ dd {
   .source-record-row,
   .source-record-card-head {
     grid-template-columns: 1fr;
+  }
+
+  .import-header-row {
+    display: grid;
+  }
+
+  .import-adapter-select {
+    width: 100%;
   }
 
   .source-tab-header {

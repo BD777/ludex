@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"local/ludex/internal/domain"
+	"github.com/BD777/ludex/backend/internal/domain"
 )
 
 func TestUpsertSourceItemByAdapterKeyReplacesExistingItem(t *testing.T) {

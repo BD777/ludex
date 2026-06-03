@@ -7,13 +7,14 @@ import (
 	"net/http"
 	"os"
 
-	"local/ludex/internal/httpapi"
-	"local/ludex/internal/storage"
+	"github.com/BD777/ludex/backend/internal/httpapi"
+	"github.com/BD777/ludex/backend/internal/storage"
 )
 
 func main() {
 	addr := envAny([]string{"LUDEX_ADDR", "GMB_ADDR"}, "127.0.0.1:8787")
 	dataDir := envAny([]string{"LUDEX_DATA_DIR", "GMB_DATA_DIR"}, ".data")
+	publicDir := envAny([]string{"LUDEX_PUBLIC_DIR"}, "")
 
 	store, err := storage.Open(dataDir)
 	if err != nil {
@@ -23,10 +24,13 @@ func main() {
 
 	server := &http.Server{
 		Addr:    addr,
-		Handler: httpapi.New(store),
+		Handler: httpapi.NewWithOptions(store, httpapi.Options{PublicDir: publicDir}),
 	}
 
 	fmt.Printf("Ludex API listening on http://%s\n", addr)
+	if publicDir != "" {
+		fmt.Printf("Serving Ludex UI from %s\n", publicDir)
+	}
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}

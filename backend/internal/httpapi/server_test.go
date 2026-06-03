@@ -2,13 +2,64 @@ package httpapi
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
-	"local/ludex/internal/domain"
-	telegramsource "local/ludex/internal/source/telegram"
-	"local/ludex/internal/storage"
+	"github.com/BD777/ludex/backend/internal/domain"
+	telegramsource "github.com/BD777/ludex/backend/internal/source/telegram"
+	"github.com/BD777/ludex/backend/internal/storage"
 )
+
+func TestPublicDirServesSPAWithoutCatchingAPI(t *testing.T) {
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	publicDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(publicDir, "index.html"), []byte("<html>Ludex UI</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(publicDir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(publicDir, "assets", "app.js"), []byte("console.log('ludex')"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewWithOptions(store, Options{PublicDir: publicDir})
+
+	cases := []struct {
+		path       string
+		statusCode int
+		body       string
+	}{
+		{path: "/", statusCode: http.StatusOK, body: "Ludex UI"},
+		{path: "/assets/app.js", statusCode: http.StatusOK, body: "console.log"},
+		{path: "/library/game/1", statusCode: http.StatusOK, body: "Ludex UI"},
+		{path: "/api/not-found", statusCode: http.StatusNotFound, body: "404"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != tc.statusCode {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.statusCode)
+			}
+			if !strings.Contains(rec.Body.String(), tc.body) {
+				t.Fatalf("body %q does not contain %q", rec.Body.String(), tc.body)
+			}
+		})
+	}
+}
 
 func TestImportF95zoneRequestFromLegacyTaskTitle(t *testing.T) {
 	task := domain.Task{

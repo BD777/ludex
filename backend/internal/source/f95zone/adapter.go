@@ -8,9 +8,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/BD777/ludex/backend/internal/domain"
 	"github.com/PuerkitoBio/goquery"
 	"golang.org/x/net/html"
-	"local/ludex/internal/domain"
 )
 
 var (

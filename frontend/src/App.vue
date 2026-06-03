@@ -3127,30 +3127,40 @@ onUnmounted(() => {
       </section>
 
       <section v-else-if="view === 'import'" class="workspace import-workspace">
-        <div class="import-mode-row" role="tablist" aria-label="Import mode">
-          <button
-            type="button"
-            class="import-mode-button"
-            :class="{ active: importMode === 'browse' }"
-            role="tab"
-            :aria-selected="importMode === 'browse'"
-            @click="setImportMode('browse')"
-          >
-            <Icon name="globe" :size="17" />
-            <span>Browse Source</span>
-          </button>
-          <button
-            type="button"
-            class="import-mode-button"
-            :class="{ active: importMode === 'direct' }"
-            role="tab"
-            :aria-selected="importMode === 'direct'"
-            :disabled="selectedAdapter.id !== 'f95zone'"
-            @click="setImportMode('direct')"
-          >
-            <Icon name="link" :size="17" />
-            <span>Direct URL</span>
-          </button>
+        <div class="import-header-row">
+          <label class="import-adapter-select">
+            <span>Adapter</span>
+            <select :value="selectedAdapterId" @change="changeImportAdapter">
+              <option v-for="adapter in availableAdapters" :key="adapter.id" :value="adapter.id">
+                {{ adapter.name }}
+              </option>
+            </select>
+          </label>
+          <div class="import-mode-row" role="tablist" aria-label="Import mode">
+            <button
+              type="button"
+              class="import-mode-button"
+              :class="{ active: importMode === 'browse' }"
+              role="tab"
+              :aria-selected="importMode === 'browse'"
+              @click="setImportMode('browse')"
+            >
+              <Icon name="globe" :size="17" />
+              <span>Browse Source</span>
+            </button>
+            <button
+              type="button"
+              class="import-mode-button"
+              :class="{ active: importMode === 'direct' }"
+              role="tab"
+              :aria-selected="importMode === 'direct'"
+              :disabled="selectedAdapter.id !== 'f95zone'"
+              @click="setImportMode('direct')"
+            >
+              <Icon name="link" :size="17" />
+              <span>Direct URL</span>
+            </button>
+          </div>
         </div>
 
         <div
@@ -3242,14 +3252,6 @@ onUnmounted(() => {
 
         <div v-if="importMode === 'browse'" class="detail-pane adapter-browser-pane import-browser-pane">
           <div class="adapter-browser-controls">
-            <label>
-              <span>Adapter</span>
-              <select :value="selectedAdapterId" @change="changeImportAdapter">
-                <option v-for="adapter in availableAdapters" :key="adapter.id" :value="adapter.id">
-                  {{ adapter.name }}
-                </option>
-              </select>
-            </label>
             <template v-if="selectedAdapter.id !== 'telegram'">
               <label>
                 <span>Source list</span>

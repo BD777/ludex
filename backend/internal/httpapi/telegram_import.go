@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"local/ludex/internal/domain"
-	telegramsource "local/ludex/internal/source/telegram"
+	"github.com/BD777/ludex/backend/internal/domain"
+	telegramsource "github.com/BD777/ludex/backend/internal/source/telegram"
 )
 
 type importTelegramRequest struct {

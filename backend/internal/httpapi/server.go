@@ -18,18 +18,19 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/BD777/ludex/backend/internal/domain"
+	"github.com/BD777/ludex/backend/internal/source/f95zone"
+	telegramsource "github.com/BD777/ludex/backend/internal/source/telegram"
+	"github.com/BD777/ludex/backend/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/net/proxy"
-	"local/ludex/internal/domain"
-	"local/ludex/internal/source/f95zone"
-	telegramsource "local/ludex/internal/source/telegram"
-	"local/ludex/internal/storage"
 )
 
 //go:embed extensions/ludex-browser-bridge/*
@@ -37,10 +38,15 @@ var extensionFiles embed.FS
 
 type Server struct {
 	store            *storage.Store
+	publicDir        string
 	mediaDownloads   chan struct{}
 	gameMutationMu   sync.Mutex
 	browseCoverMu    sync.Mutex
 	browseCoverCache map[string]string
+}
+
+type Options struct {
+	PublicDir string
 }
 
 type progressReporter func(current int, total int, message string)
@@ -65,9 +71,14 @@ const (
 )
 
 func New(store *storage.Store) http.Handler {
+	return NewWithOptions(store, Options{})
+}
+
+func NewWithOptions(store *storage.Store, options Options) http.Handler {
 	_ = store.MarkActiveTasksInterrupted(context.Background())
 	server := &Server{
 		store:            store,
+		publicDir:        strings.TrimSpace(options.PublicDir),
 		mediaDownloads:   make(chan struct{}, configuredMediaDownloadSlots()),
 		browseCoverCache: map[string]string{},
 	}
@@ -116,6 +127,10 @@ func New(store *storage.Store) http.Handler {
 	r.Post("/api/import/f95zone", server.importF95zone)
 	r.Post("/api/import/telegram", server.importTelegram)
 
+	if server.publicDir != "" {
+		r.NotFound(server.servePublicApp)
+	}
+
 	return r
 }
 
@@ -124,6 +139,37 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		"ok":      true,
 		"dataDir": s.store.DataDir(),
 	})
+}
+
+func (s *Server) servePublicApp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.NotFound(w, r)
+		return
+	}
+	if r.URL.Path == "/api" ||
+		r.URL.Path == "/extensions" ||
+		r.URL.Path == "/media" ||
+		strings.HasPrefix(r.URL.Path, "/api/") ||
+		strings.HasPrefix(r.URL.Path, "/extensions/") ||
+		strings.HasPrefix(r.URL.Path, "/media/") {
+		http.NotFound(w, r)
+		return
+	}
+
+	relPath := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+	if relPath == "." || relPath == "" {
+		relPath = "index.html"
+	}
+	fullPath := filepath.Join(s.publicDir, filepath.FromSlash(relPath))
+	if info, err := os.Stat(fullPath); err == nil && !info.IsDir() {
+		http.ServeFile(w, r, fullPath)
+		return
+	}
+	if filepath.Ext(relPath) != "" {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, filepath.Join(s.publicDir, "index.html"))
 }
 
 func (s *Server) serveBrowserExtensionZip(w http.ResponseWriter, r *http.Request) {

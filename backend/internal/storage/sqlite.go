@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BD777/ludex/backend/internal/domain"
 	_ "github.com/mattn/go-sqlite3"
-	"local/ludex/internal/domain"
 )
 
 type Store struct {

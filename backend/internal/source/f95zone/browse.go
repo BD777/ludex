@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/BD777/ludex/backend/internal/domain"
 	"github.com/PuerkitoBio/goquery"
-	"local/ludex/internal/domain"
 )
 
 const baseURL = "https://f95zone.to"

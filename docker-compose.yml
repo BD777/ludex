@@ -1,0 +1,18 @@
+services:
+  ludex:
+    build: .
+    image: ludex:local
+    ports:
+      - "8787:8787"
+    environment:
+      LUDEX_ADDR: 0.0.0.0:8787
+      LUDEX_DATA_DIR: /data
+      LUDEX_PUBLIC_DIR: /app/public
+      LUDEX_TELEGRAM_API_ID: ${LUDEX_TELEGRAM_API_ID:-}
+      LUDEX_TELEGRAM_API_HASH: ${LUDEX_TELEGRAM_API_HASH:-}
+    volumes:
+      - ludex-data:/data
+    restart: unless-stopped
+
+volumes:
+  ludex-data:
