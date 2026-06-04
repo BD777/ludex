@@ -5,11 +5,59 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/BD777/ludex/backend/internal/domain"
 )
+
+func TestDefaultDatabasePathPrefersLegacyWhenCurrentIsEmpty(t *testing.T) {
+	dataDir := t.TempDir()
+	current := filepath.Join(dataDir, "ludex.db")
+	legacy := filepath.Join(dataDir, "game-meta-browser.db")
+	if err := os.WriteFile(current, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte("legacy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := defaultDatabasePath(dataDir); got != legacy {
+		t.Fatalf("database path = %q, want %q", got, legacy)
+	}
+}
+
+func TestBrowseCoverCacheRoundTripsMediaAsset(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	asset, err := store.CreateMediaAsset(ctx, domain.MediaAsset{
+		Type:        "image",
+		LocalPath:   "/tmp/ludex-cover.jpg",
+		OriginalURL: "https://attachments.example.test/cover.jpg",
+		Hash:        "cover-hash",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertBrowseCoverMediaAsset(ctx, "f95zone", "https://f95zone.to/threads/example.1/preview", asset.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.GetBrowseCoverMediaAsset(ctx, "f95zone", "https://f95zone.to/threads/example.1/preview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != asset.ID || got.OriginalURL != asset.OriginalURL {
+		t.Fatalf("asset = %#v, want id %d url %q", got, asset.ID, asset.OriginalURL)
+	}
+}
 
 func TestUpsertSourceItemByAdapterKeyReplacesExistingItem(t *testing.T) {
 	store, err := Open(t.TempDir())

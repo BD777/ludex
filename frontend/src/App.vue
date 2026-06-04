@@ -363,6 +363,7 @@ let errorTimer: number | undefined;
 
 const importDraftStorageKey = "gmb.importDraft.v1";
 const adapterBrowseStorageKey = "gmb.adapterBrowse.v1";
+const adapterCoverStateStorageKey = "gmb.adapterCoverStates.v1";
 const lastImportTaskStorageKey = "gmb.lastImportTaskId.v1";
 let restoringAdapterBrowseState = false;
 
@@ -1462,7 +1463,7 @@ function prepareAdapterCoverStates(page: AdapterBrowsePage | null) {
     if (!src || adapterCoverStates[src] === "loaded") {
       continue;
     }
-    adapterCoverStates[src] = "loading";
+    adapterCoverStates[src] = item.cover_image && src === item.cover_image ? "loaded" : "loading";
   }
 }
 
@@ -1477,12 +1478,14 @@ function adapterBrowseCoverStatus(item: AdapterListItem): CoverLoadState | "miss
 function markAdapterCoverLoaded(src: string) {
   if (src) {
     adapterCoverStates[src] = "loaded";
+    persistAdapterCoverStates();
   }
 }
 
 function markAdapterCoverFailed(src: string) {
   if (src) {
     adapterCoverStates[src] = "failed";
+    persistAdapterCoverStates();
   }
 }
 
@@ -2245,6 +2248,26 @@ function restoreAdapterBrowseState() {
   }
 }
 
+function restoreAdapterCoverStates() {
+  const savedState = localStorage.getItem(adapterCoverStateStorageKey);
+  if (!savedState) {
+    return;
+  }
+  try {
+    const loadedSources = JSON.parse(savedState);
+    if (!Array.isArray(loadedSources)) {
+      return;
+    }
+    for (const src of loadedSources) {
+      if (typeof src === "string" && src) {
+        adapterCoverStates[src] = "loaded";
+      }
+    }
+  } catch {
+    localStorage.removeItem(adapterCoverStateStorageKey);
+  }
+}
+
 function persistImportDraft() {
   try {
     if (isImportDraftEmpty()) {
@@ -2282,6 +2305,18 @@ function persistAdapterBrowseState() {
     );
   } catch (err) {
     error.value = `Could not save browse state: ${toMessage(err)}`;
+  }
+}
+
+function persistAdapterCoverStates() {
+  try {
+    const loadedSources = Object.entries(adapterCoverStates)
+      .filter(([, state]) => state === "loaded")
+      .map(([src]) => src)
+      .slice(-500);
+    localStorage.setItem(adapterCoverStateStorageKey, JSON.stringify(loadedSources));
+  } catch (err) {
+    error.value = `Could not save cover state: ${toMessage(err)}`;
   }
 }
 
@@ -2364,6 +2399,7 @@ watch(error, (message) => {
 
 onMounted(() => {
   restoreImportState();
+  restoreAdapterCoverStates();
   restoreAdapterBrowseState();
   void loadAll();
   if (selectedAdapterId.value === "telegram") {

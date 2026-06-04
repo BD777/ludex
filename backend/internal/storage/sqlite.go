@@ -81,7 +81,13 @@ func sqlPlaceholders(count int) string {
 func defaultDatabasePath(dataDir string) string {
 	current := filepath.Join(dataDir, "ludex.db")
 	legacy := filepath.Join(dataDir, "game-meta-browser.db")
-	if _, err := os.Stat(current); err == nil {
+	if stat, err := os.Stat(current); err == nil {
+		if stat.Size() > 0 {
+			return current
+		}
+		if _, legacyErr := os.Stat(legacy); legacyErr == nil {
+			return legacy
+		}
 		return current
 	}
 	if _, err := os.Stat(legacy); err == nil {
@@ -307,6 +313,15 @@ CREATE TABLE IF NOT EXISTS media_assets (
 	created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS browse_cover_cache (
+	adapter_id TEXT NOT NULL,
+	preview_url TEXT NOT NULL,
+	media_asset_id INTEGER NOT NULL REFERENCES media_assets(id) ON DELETE CASCADE,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(adapter_id, preview_url)
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	kind TEXT NOT NULL,
@@ -331,6 +346,7 @@ CREATE INDEX IF NOT EXISTS idx_source_items_match ON source_items(matched_game_i
 CREATE INDEX IF NOT EXISTS idx_media_assets_game ON media_assets(game_id);
 CREATE INDEX IF NOT EXISTS idx_media_assets_source_item ON media_assets(source_item_id);
 CREATE INDEX IF NOT EXISTS idx_media_assets_original_url ON media_assets(original_url);
+CREATE INDEX IF NOT EXISTS idx_browse_cover_cache_media ON browse_cover_cache(media_asset_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
@@ -1134,6 +1150,36 @@ WHERE original_url = ?
 ORDER BY id DESC
 LIMIT 1`, originalURL)
 	return scanMediaAsset(row)
+}
+
+func (s *Store) GetBrowseCoverMediaAsset(ctx context.Context, adapterID string, previewURL string) (domain.MediaAsset, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT media_assets.id, media_assets.game_id, media_assets.source_item_id, media_assets.type, media_assets.local_path, media_assets.original_url, media_assets.hash, media_assets.created_at
+FROM browse_cover_cache
+JOIN media_assets ON media_assets.id = browse_cover_cache.media_asset_id
+WHERE browse_cover_cache.adapter_id = ? AND browse_cover_cache.preview_url = ?
+LIMIT 1`, adapterID, previewURL)
+	return scanMediaAsset(row)
+}
+
+func (s *Store) UpsertBrowseCoverMediaAsset(ctx context.Context, adapterID string, previewURL string, mediaAssetID int64) error {
+	if adapterID == "" || previewURL == "" || mediaAssetID <= 0 {
+		return nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO browse_cover_cache (adapter_id, preview_url, media_asset_id, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(adapter_id, preview_url) DO UPDATE SET
+	media_asset_id = excluded.media_asset_id,
+	updated_at = excluded.updated_at`,
+		adapterID,
+		previewURL,
+		mediaAssetID,
+		now,
+		now,
+	)
+	return err
 }
 
 func (s *Store) ListMediaAssetsForSourceItem(ctx context.Context, sourceItemID int64) ([]domain.MediaAsset, error) {

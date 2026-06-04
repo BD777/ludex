@@ -87,6 +87,9 @@ func (s *Server) browseTelegram(ctx context.Context, req browseAdapterRequest, c
 		for _, message := range messagePage.Messages {
 			item, ok := telegramAdapterListItem(source, message)
 			if ok {
+				if cover := s.cachedMediaPublicURLForOriginalURL(ctx, item.PreviewURL); cover != "" {
+					item.CoverImage = cover
+				}
 				page.Items = append(page.Items, item)
 			}
 		}

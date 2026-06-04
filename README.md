@@ -8,6 +8,16 @@ Ludex keeps game metadata, imported source transcripts, cached images, auth
 profiles, and Telegram sessions on your own machine. It is intended to be run on
 `localhost` or inside a private Docker deployment.
 
+## Screenshots
+
+Browse source adapters and import candidates:
+
+![Ludex import source browser](docs/screenshots/import-browse-source.jpg)
+
+Review linked adapter transcripts for a game:
+
+![Ludex game source records](docs/screenshots/games-sources.jpg)
+
 Current scope:
 
 - Go backend with SQLite storage.

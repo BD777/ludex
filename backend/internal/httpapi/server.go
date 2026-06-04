@@ -307,6 +307,7 @@ func (s *Server) browseAdapterCover(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		asset.PublicURL = mediaPublicURL(asset.ID)
+		w.Header().Set("Cache-Control", "private, max-age=86400")
 		http.Redirect(w, r, asset.PublicURL, http.StatusTemporaryRedirect)
 		return
 	}
@@ -324,6 +325,7 @@ func (s *Server) browseAdapterCover(w http.ResponseWriter, r *http.Request) {
 		s.serveImagePlaceholder(w, r)
 		return
 	}
+	w.Header().Set("Cache-Control", "private, max-age=86400")
 	http.Redirect(w, r, publicURL, http.StatusTemporaryRedirect)
 }
 
@@ -1857,6 +1859,7 @@ func (s *Server) f95zoneBrowseCoverPublicURL(ctx context.Context, previewURL str
 		return "", err
 	}
 	asset.PublicURL = mediaPublicURL(asset.ID)
+	_ = s.store.UpsertBrowseCoverMediaAsset(ctx, "f95zone", previewURL, asset.ID)
 	s.setCachedBrowseCover(previewURL, asset.PublicURL)
 	return asset.PublicURL, nil
 }
@@ -1865,12 +1868,21 @@ func (s *Server) cachedBrowseCover(ctx context.Context, previewURL string) strin
 	s.browseCoverMu.Lock()
 	publicURL := s.browseCoverCache[previewURL]
 	s.browseCoverMu.Unlock()
-	if publicURL == "" || !s.mediaPublicURLExists(ctx, publicURL) {
-		if publicURL != "" {
-			s.clearCachedBrowseCover(previewURL)
-		}
+	if publicURL != "" && s.mediaPublicURLExists(ctx, publicURL) {
+		return publicURL
+	}
+	if publicURL != "" {
+		s.clearCachedBrowseCover(previewURL)
+	}
+	asset, err := s.store.GetBrowseCoverMediaAsset(ctx, "f95zone", strings.TrimSpace(previewURL))
+	if err != nil {
 		return ""
 	}
+	if !s.mediaAssetFileExists(asset) {
+		return ""
+	}
+	publicURL = mediaPublicURL(asset.ID)
+	s.setCachedBrowseCover(previewURL, publicURL)
 	return publicURL
 }
 
@@ -1898,6 +1910,21 @@ func (s *Server) mediaPublicURLExists(ctx context.Context, publicURL string) boo
 	if err != nil {
 		return false
 	}
+	return s.mediaAssetFileExists(asset)
+}
+
+func (s *Server) cachedMediaPublicURLForOriginalURL(ctx context.Context, rawURL string) string {
+	asset, err := s.store.GetMediaAssetByOriginalURL(ctx, strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	if !s.mediaAssetFileExists(asset) {
+		return ""
+	}
+	return mediaPublicURL(asset.ID)
+}
+
+func (s *Server) mediaAssetFileExists(asset domain.MediaAsset) bool {
 	safePath, err := s.safeDataPath(asset.LocalPath)
 	if err != nil {
 		return false
